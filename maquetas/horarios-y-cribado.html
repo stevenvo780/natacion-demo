@@ -1,0 +1,1662 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pre-horario y Cribado - Local Offline con Cribado Engine</title>
+  
+  <!-- Carga de React y ReactDOM vía CDN para uso local offline/online -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  
+  <!-- Transpilador Babel para procesar JSX directamente en navegador local -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+  
+  <!-- Tailwind CSS CDN para estilos y animaciones fluidas -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <!-- SheetJS para leer Excel/CSV 100% offline en el navegador -->
+  <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+
+  <style>
+    /* Estilos personalizados y animaciones de transición */
+    @keyframes slideIn {
+      from { transform: translateY(1.5rem); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @keyframes slideLeft {
+      from { transform: translateX(100%); }
+      to { transform: translateX(0); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .animate-slide-in {
+      animation: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .animate-slide-left {
+      animation: slideLeft 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+    .animate-fade-in {
+      animation: fadeIn 0.2s ease-out forwards;
+    }
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+    .drag-active {
+      border: 2px dashed #3b82f6 !important;
+      background-color: rgba(59, 130, 246, 0.1) !important;
+    }
+    .sidebar-transition {
+      transition: width 300ms cubic-bezier(0.4, 0, 0.2, 1), transform 300ms cubic-bezier(0.4, 0, 0.2, 1);
+    }
+  </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen overflow-hidden flex flex-col">
+  <div id="root" class="h-screen flex flex-col"></div>
+
+  <script type="text/babel">
+    const { useState, useMemo, useCallback, useEffect } = React;
+
+    // ─────────────────────────────────────────────────────────────
+    // CONSTANTES Y CONFIGURACIONES
+    // ─────────────────────────────────────────────────────────────
+    const DAYS = ["L", "M", "X", "J", "V", "S"];
+    const DAY_LABELS = {
+      L: "Lunes", M: "Martes", X: "Miércoles", J: "Jueves", V: "Viernes", S: "Sábado"
+    };
+    const DAY_SHORT = {
+      L: "Lun", M: "Mar", X: "Mié", J: "Jue", V: "Vie", S: "Sáb"
+    };
+
+    const ALL_CATEGORIES = [
+      "Bebés", "Niños", "Jóvenes", "Mini-grupo", "Adultos",
+      "Tecnificación", "Preparación pruebas acceso", "Terapia Acuática", "Embarazadas"
+    ];
+
+    const CAT_STYLE = {
+      "Bebés":                      { bg: "#fdf4ff", text: "#a21caf", border: "#e879f9", dot: "#d946ef", darkText: "#701a75" },
+      "Niños":                      { bg: "#eff6ff", text: "#1d4ed8", border: "#60a5fa", dot: "#3b82f6", darkText: "#1e40af" },
+      "Jóvenes":                    { bg: "#f0fdf4", text: "#15803d", border: "#4ade80", dot: "#22c55e", darkText: "#166534" },
+      "Mini-grupo":                 { bg: "#fff7ed", text: "#c2410c", border: "#fb923c", dot: "#f97316", darkText: "#9a3412" },
+      "Adultos":                    { bg: "#f8fafc", text: "#334155", border: "#94a3b8", dot: "#64748b", darkText: "#1e293b" },
+      "Tecnificación":              { bg: "#fefce8", text: "#854d0e", border: "#facc15", dot: "#eab308", darkText: "#713f12" },
+      "Preparación pruebas acceso": { bg: "#fff1f2", text: "#9f1239", border: "#fda4af", dot: "#f43f5e", darkText: "#9f1239" },
+      "Terapia Acuática":           { bg: "#f0fdfa", text: "#0f766e", border: "#2dd4bf", dot: "#14b8a6", darkText: "#115e59" },
+      "Embarazadas":                { bg: "#faf5ff", text: "#6b21a8", border: "#c084fc", dot: "#a855f7", darkText: "#581c87" }
+    };
+
+    const RATIO_LIMITS = {
+      "Bebés": 2, "Niños": 4, "Jóvenes": 4, "Mini-grupo": 3, "Adultos": 4,
+      "Tecnificación": 4, "Preparación pruebas acceso": 4, "Terapia Acuática": 1, "Embarazadas": 3
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // HELPERS DE TIEMPO Y FECHAS
+    // ─────────────────────────────────────────────────────────────
+    function timeToMinutes(t) {
+      if (!t) return 0;
+      const [h, m] = t.split(":").map(Number);
+      return (h || 0) * 60 + (m || 0);
+    }
+
+    function minutesToTime(n) {
+      const h = Math.floor(n / 60) % 24;
+      const m = n % 60;
+      return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+
+    function slotDuration(slot) {
+      const base = slot.baseDur || 120;
+      return Math.max(5, base + slot.manualDeltaMin);
+    }
+
+    function computeSlotTimes(slots, dayStart) {
+      let cursor = timeToMinutes(dayStart);
+      return slots.map((slot) => {
+        if (slot.startTime) {
+           cursor = timeToMinutes(slot.startTime);
+        }
+        const dur = slotDuration(slot);
+        const start = minutesToTime(cursor);
+        cursor += dur;
+        const end = minutesToTime(cursor);
+        return { start, end, dur };
+      });
+    }
+
+    function generateSlotId() {
+      return "slot-" + Math.random().toString(36).slice(2, 9);
+    }
+
+    function generateSlots(startTime, endTime) {
+      const slots = [];
+      let cur = timeToMinutes(startTime);
+      const end = timeToMinutes(endTime);
+      
+      while (cur < end) {
+        let duration = 120; 
+        if (cur + duration > end) duration = end - cur;
+        
+        const slot = { 
+          id: generateSlotId(), 
+          studentIds: [], 
+          manualDeltaMin: 0, 
+          baseDur: duration,
+          startTime: minutesToTime(cur) 
+        };
+        slots.push(slot);
+        cur += duration;
+      }
+      return slots;
+    }
+
+    function makeDaySchedule(active, start, end) {
+      if (!active || !start || !end) {
+        return { active: false, tempAbsent: false, startTime: "15:00", endTime: "21:00", slots: [], turnos: { manana: true, tarde: true } };
+      }
+      return {
+        active: true,
+        tempAbsent: false,
+        startTime: start,
+        endTime: end,
+        slots: generateSlots(start, end),
+        turnos: { manana: true, tarde: true }
+      };
+    }
+
+    function isTeacherActiveOnDate(teacher, dateStr) {
+      if (!teacher.fechaInicio && !teacher.fechaFin) return true;
+      if (!dateStr) return true;
+
+      const current = new Date(dateStr);
+      current.setHours(0, 0, 0, 0);
+
+      if (teacher.fechaInicio) {
+        const start = new Date(teacher.fechaInicio);
+        start.setHours(0, 0, 0, 0);
+        if (current < start) return false;
+      }
+      if (teacher.fechaFin) {
+        const end = new Date(teacher.fechaFin);
+        end.setHours(23, 59, 59, 999);
+        if (current > end) return false;
+      }
+      return true;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // HELPERS DE IMPORTACIÓN AVANZADA
+    // ─────────────────────────────────────────────────────────────
+    // Extrae y normaliza los días a partir de un texto libre
+    const parseDaysRequested = (raw) => {
+      if (!raw) return ["L"];
+      const str = String(raw).toUpperCase();
+      const res = new Set();
+      if (str.includes('LUN') || /\bL\b/.test(str)) res.add('L');
+      if (str.includes('MAR') || /\bM\b/.test(str)) res.add('M');
+      if (str.includes('MIE') || str.includes('MIÉ') || /\bX\b/.test(str)) res.add('X');
+      if (str.includes('JUE') || /\bJ\b/.test(str)) res.add('J');
+      if (str.includes('VIE') || /\bV\b/.test(str)) res.add('V');
+      if (str.includes('SAB') || str.includes('SÁB') || /\bS\b/.test(str)) res.add('S');
+      return res.size > 0 ? Array.from(res) : ["L"];
+    };
+
+    // Extrae formato HH:MM desde texto libre
+    const parseTimeRequested = (raw, defaultTime) => {
+      if (!raw) return defaultTime;
+      const match = String(raw).match(/([01]?[0-9]|2[0-3])[:.]([0-5][0-9])/);
+      if (match) return `${match[1].padStart(2, '0')}:${match[2]}`;
+      return defaultTime;
+    };
+
+    // Buscador "Fuzzy" para nombres de columnas
+    const findFuzzyKey = (obj, aliases) => {
+      const keys = Object.keys(obj);
+      for (let alias of aliases) {
+        const found = keys.find(k => k.toLowerCase().includes(alias.toLowerCase()));
+        if (found) return obj[found];
+      }
+      return null;
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // DATOS INICIALES
+    // ─────────────────────────────────────────────────────────────
+    const INITIAL_TEACHERS = [
+      { id: "javi", name: "Javi", role: "Coordinador", color: "#0ea5e9", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos","Tecnificación"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(false), S: makeDaySchedule(false) } },
+      { id: "rafa", name: "Rafa", role: "Coordinador", color: "#6366f1", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "juan", name: "Juan", role: "Coordinador", color: "#14b8a6", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(false), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(false), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "angel", name: "Ángel", color: "#f59e0b", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "manuelL", name: "Manuel L.", color: "#ef4444", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "fran", name: "Fran", color: "#8b5cf6", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(true, "09:00","13:00") } },
+      { id: "zarco", name: "Zarco", color: "#06b6d4", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(false), S: makeDaySchedule(false) } },
+      { id: "alba", name: "Alba", color: "#ec4899", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Adultos"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "marta", name: "Marta", color: "#84cc16", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Adultos"], schedule: { L: makeDaySchedule(true, "09:00","13:00"), M: makeDaySchedule(false), X: makeDaySchedule(true, "09:00","13:00"), J: makeDaySchedule(false), V: makeDaySchedule(false), S: makeDaySchedule(false) } },
+      { id: "irene", name: "Irene", color: "#f97316", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(false), X: makeDaySchedule(false), J: makeDaySchedule(false), V: makeDaySchedule(false), S: makeDaySchedule(true, "09:00","13:00") } },
+      { id: "david", name: "David", color: "#64748b", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(false), S: makeDaySchedule(false) } },
+      { id: "desi", name: "Desi", color: "#a855f7", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo"], schedule: { L: makeDaySchedule(false), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(false), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(false), S: makeDaySchedule(false) } },
+      { id: "roberto", name: "Roberto", color: "#10b981", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(false), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(false), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(true, "09:00","13:00") } },
+      { id: "guille", name: "Guille", color: "#3b82f6", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(true, "15:00","21:00"), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(false) } },
+      { id: "amanda", name: "Amanda", color: "#e11d48", congelado: false, specialties: ["Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática","Embarazadas"], schedule: { L: makeDaySchedule(false), M: makeDaySchedule(true, "15:00","21:00"), X: makeDaySchedule(false), J: makeDaySchedule(false), V: makeDaySchedule(true, "15:00","21:00"), S: makeDaySchedule(true, "09:00","13:00") } },
+      { id: "marga", name: "Marga", color: "#d97706", congelado: false, specialties: ["Bebés","Niños","Jóvenes","Mini-grupo","Adultos","Terapia Acuática"], schedule: { L: makeDaySchedule(true, "15:00","21:00"), M: makeDaySchedule(false), X: makeDaySchedule(true, "15:00","21:00"), J: makeDaySchedule(false), V: makeDaySchedule(false), S: makeDaySchedule(false) } }
+    ];
+
+    const SURNAMES = ["García","Martínez","López","Sánchez","González","Pérez","Rodríguez","Fernández","Torres","Ramírez","Díaz","Moreno","Álvarez","Romero","Navarro","Ruiz","Domínguez","Vargas","Castillo","Vega","Delgado","Castro","Ortega","Rubio","Serrano","Blanco","Molina","Jiménez","Reyes","Herrera"];
+    const NAMES_M = ["Alejandro","Carlos","Diego","Hugo","Javier","Luis","Marcos","Pablo","Sergio","Tomás","Adrián","Iker","Mario","Iván","Rubén","Álvaro","Samuel","Daniel","Jorge","Rafael"];
+    const NAMES_F = ["Lucía","Sofía","Martina","Emma","Valeria","Noa","Claudia","Laura","Carmen","Ana","Sara","Elena","Carla","Nuria","Alba","Marta","Paula","Irene","Andrea","Isabel"];
+    const SPECIAL_NEEDS = [null,null,null,null,null,null,"Síndrome de Down","Autismo","Discapacidad Motriz","Epilepsia","Hipoacusia","TDAH"];
+    const EXPERIENCE_LEVELS = ["Sin experiencia","Iniciación","Intermedio","Avanzado"];
+    const CONTACT_ROLES = ["Padre","Madre","Otro a cargo"];
+
+    function seededRng(seed) {
+      let s = seed;
+      return () => {
+        s = (s * 1664525 + 1013904223) & 0xffffffff;
+        return Math.abs(s) / 0xffffffff;
+      };
+    }
+
+    function generateStudents() {
+      const rng = seededRng(7777);
+      const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+      const students = [];
+
+      const HORARIOS_SOLICITADOS = [
+        { start: "16:00", end: "18:00" }, { start: "17:00", end: "19:00" },
+        { start: "18:00", end: "20:00" }, { start: "19:00", end: "21:00" }
+      ];
+
+      for (let i = 0; i < 2000; i++) {
+        const isFemale = rng() > 0.5;
+        const name = isFemale ? pick(NAMES_F) : pick(NAMES_M);
+        const surname = `${pick(SURNAMES)} ${pick(SURNAMES)}`;
+        const cat = pick(ALL_CATEGORIES);
+
+        let age, ageUnit;
+        if (cat === "Bebés") { age = Math.floor(rng() * 18) + 1; ageUnit = "meses"; }
+        else if (cat === "Niños") { age = Math.floor(rng() * 10) + 2; ageUnit = "años"; }
+        else if (cat === "Jóvenes") { age = Math.floor(rng() * 5) + 13; ageUnit = "años"; }
+        else if (cat === "Embarazadas") { age = Math.floor(rng() * 20) + 20; ageUnit = "años"; }
+        else { age = Math.floor(rng() * 50) + 18; ageUnit = "años"; }
+
+        const dayRoll = rng();
+        let requestedDays = [];
+
+        if (dayRoll < 0.35) {
+          requestedDays = [pick(DAYS)];
+        } else if (dayRoll < 0.75) {
+          requestedDays = pick([["L", "X"], ["M", "J"], ["L", "V"]]);
+        } else if (dayRoll < 0.90) {
+          requestedDays = pick([["M", "V"], ["V", "S"], ["L", "M"]]);
+        } else {
+          requestedDays = ["L", "X", "V"];
+        }
+
+        let selectedTime = pick(HORARIOS_SOLICITADOS);
+
+        if (requestedDays.includes("S")) {
+          selectedTime = { start: "11:00", end: "13:00" };
+        }
+
+        const numContacts = Math.floor(rng() * 2) + 1;
+        const contacts = Array.from({ length: numContacts }, (_, ci) => ({
+          role: cat === "Adultos" || cat === "Embarazadas" ? "Propio" : (CONTACT_ROLES[ci % CONTACT_ROLES.length]),
+          name: `${pick(NAMES_M)} ${pick(SURNAMES)}`,
+          phone: `6${String(Math.floor(Math.abs(rng()) * 90000000 + 10000000)).slice(0, 8)}`,
+          email: `contacto${i}${ci}@email.com`
+        }));
+
+        students.push({
+          id: `stu-${i}`, name, surname, age, ageUnit, category: cat,
+          specialNeed: rng() < 0.08 ? pick(SPECIAL_NEEDS.filter(Boolean)) : null,
+          experience: pick(EXPERIENCE_LEVELS), requestedDays,
+          requestedTimeStart: selectedTime.start, requestedTimeEnd: selectedTime.end,
+          contacts, linkedIds: [],
+          extraData: {} // Preparamos la estructura para data importada
+        });
+      }
+
+      const siblingGroups = [];
+      for (let k = 5; k < 1990; k += 8) {
+        siblingGroups.push([k, k + 1]);
+      }
+      
+      siblingGroups.forEach(([a, b]) => {
+        if (students[a] && students[b]) {
+          students[a].linkedIds = [students[b].id];
+          students[b].linkedIds = [students[a].id];
+          students[b].surname = students[a].surname;
+        }
+      });
+
+      return students;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // MODALES Y COMPONENTES REUTILIZABLES
+    // ─────────────────────────────────────────────────────────────
+    function ToastBar({ toasts }) {
+      return (
+        <div className="fixed bottom-6 right-6 z-[100] flex flex-col gap-2 max-w-sm pointer-events-none">
+          {toasts.map(t => (
+            <div key={t.id} className={`p-4 rounded-xl shadow-xl text-white font-semibold flex items-center gap-3 transition-all duration-300 animate-slide-in ${
+              t.type === "err" ? "bg-rose-600" : t.type === "ok" ? "bg-emerald-600" : "bg-slate-800"
+            }`}>
+              <span>{t.type === "err" ? "⚠️" : t.type === "ok" ? "✓" : "ℹ️"}</span>
+              <span className="text-sm">{t.text}</span>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    function ConfirmModal({ isOpen, title, message, onConfirm, onCancel }) {
+      if (!isOpen) return null;
+      return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-6 w-full max-w-md animate-slide-in">
+            <h3 className="text-xl font-bold text-white mb-2">{title}</h3>
+            <p className="text-slate-300 text-sm mb-6">{message}</p>
+            <div className="flex justify-end gap-3">
+              <button onClick={onCancel} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-medium transition-colors">Cancelar</button>
+              <button onClick={onConfirm} className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-lg text-sm font-medium transition-colors shadow-lg shadow-rose-600/20">Eliminar</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function TeacherModal({ isOpen, onClose, onSave, activeDay }) {
+      const [name, setName] = useState("");
+      const [startDate, setStartDate] = useState("");
+      const [endDate, setEndDate] = useState("");
+      const [cats, setCats] = useState([]);
+      const [color, setColor] = useState("#3b82f6");
+      const [obs, setObs] = useState("");
+
+      if (!isOpen) return null;
+
+      const handleCatToggle = (cat) => {
+        setCats(prev => prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat]);
+      };
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        onSave({ name, startDate, endDate, specialties: cats, color, obs });
+        setName(""); setStartDate(""); setEndDate(""); setCats([]); setColor("#3b82f6"); setObs("");
+      };
+
+      return (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden animate-slide-in flex flex-col max-h-[90vh]">
+            <div className="p-5 border-b border-slate-700 flex justify-between items-center bg-slate-800/80">
+              <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><line x1="20" y1="8" x2="20" y2="14"/><line x1="23" y1="11" x2="17" y2="11"/></svg>
+                Añadir Profesor
+              </h2>
+              <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+            
+            <form onSubmit={handleSubmit} className="p-5 overflow-y-auto flex-1 space-y-5 custom-scrollbar">
+              <div className="flex gap-4">
+                <div className="flex-1">
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Nombre <span className="text-rose-500">*</span></label>
+                  <input required type="text" value={name} onChange={e => setName(e.target.value)} placeholder="Ej. Carlos G." className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all" />
+                </div>
+                <div className="w-20">
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Color</label>
+                  <input type="color" value={color} onChange={e => setColor(e.target.value)} className="w-full h-[38px] rounded-lg cursor-pointer bg-slate-900 border border-slate-700 p-1" />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Fecha Inicio (Opcional)</label>
+                  <input type="date" value={startDate} onChange={e => setStartDate(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-blue-500 transition-all" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Fecha Fin (Opcional)</label>
+                  <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-blue-500 transition-all" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Categorías Permitidas <span className="text-rose-500">*</span></label>
+                <div className="flex flex-wrap gap-2">
+                  {ALL_CATEGORIES.map(cat => {
+                    const isSelected = cats.includes(cat);
+                    const cs = CAT_STYLE[cat] || { bg: "#334155", darkText: "#f8fafc", border: "#475569" };
+                    return (
+                      <button
+                        type="button"
+                        key={cat}
+                        onClick={() => handleCatToggle(cat)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-bold transition-all border ${isSelected ? 'shadow-sm shadow-current' : 'opacity-50 grayscale hover:grayscale-0'}`}
+                        style={{
+                          backgroundColor: isSelected ? cs.bg : 'transparent',
+                          color: isSelected ? cs.darkText : '#94a3b8',
+                          borderColor: isSelected ? cs.border : '#475569'
+                        }}
+                      >
+                        {isSelected && <span className="mr-1">✓</span>}{cat}
+                      </button>
+                    )
+                  })}
+                </div>
+                {cats.length === 0 && <p className="text-xs text-rose-400 mt-2">Selecciona al menos una categoría.</p>}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Observaciones</label>
+                <textarea rows="2" value={obs} onChange={e => setObs(e.target.value)} placeholder="Contrato temporal, necesidades específicas..." className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-blue-500 transition-all resize-none"></textarea>
+              </div>
+            </form>
+
+            <div className="p-5 border-t border-slate-700 bg-slate-800/80 flex justify-end gap-3">
+              <button type="button" onClick={onClose} className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-medium transition-colors">Cancelar</button>
+              <button type="button" onClick={handleSubmit} disabled={name.trim() === '' || cats.length === 0} className="px-5 py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-bold transition-colors shadow-lg shadow-blue-500/20">Añadir Profesor</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function InfoPanel({ student, onClose, studentsMap, teachers }) {
+      if (!student) return null;
+      const cs = CAT_STYLE[student.category] || { bg: "#f3f4f6", darkText: "#1f2937", border: "#e5e7eb", text: "#1f2937" };
+      const hasAlert = !!student.specialNeed;
+
+      const assignments = [];
+      teachers.forEach(t => {
+        DAYS.forEach(d => {
+          const ds = t.schedule[d];
+          if (!ds.active) return;
+          const times = computeSlotTimes(ds.slots, ds.startTime);
+          ds.slots.forEach((sl, i) => {
+            if (sl.studentIds.includes(student.id)) {
+              assignments.push({ teacher: t, day: d, slotStart: times[i]?.start ?? "?" });
+            }
+          });
+        });
+      });
+
+      // Extraer datos adicionales para mostrar todo lo captado en el excel/xml
+      const extraDataEntries = student.extraData ? Object.entries(student.extraData) : [];
+
+      return (
+        <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/40 backdrop-blur-sm" onClick={onClose}>
+          <div
+            onClick={e => e.stopPropagation()}
+            className="w-full max-w-md bg-slate-800 h-full overflow-y-auto shadow-2xl flex flex-col animate-slide-left border-l border-slate-700"
+          >
+            <div className="p-6 border-b border-slate-700 flex justify-between items-start" style={{ borderBottomColor: cs.border }}>
+              <div>
+                <h2 className="text-2xl font-bold text-white mb-1">{student.name} {student.surname}</h2>
+                <div className="flex flex-wrap gap-2">
+                  <span className="px-3 py-1 rounded-full text-xs font-bold shadow-sm" style={{ backgroundColor: cs.bg, color: cs.darkText }}>
+                    {student.category}
+                  </span>
+                  <span className="px-3 py-1 rounded-full bg-slate-700 text-xs text-slate-200">
+                    {student.age} {student.ageUnit}
+                  </span>
+                  {hasAlert && (
+                    <span className="px-3 py-1 rounded-full bg-rose-500 text-xs font-bold text-white shadow-sm flex items-center gap-1">
+                      ⚠️ {student.specialNeed}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <button onClick={onClose} className="p-2 bg-slate-700 hover:bg-slate-600 rounded-full text-slate-300 transition-colors">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+              </button>
+            </div>
+
+            <div className="p-6 flex-1 flex flex-col gap-6 text-slate-300">
+              <section className="bg-slate-750 p-4 rounded-xl border border-slate-700 shadow-inner">
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Preferencias Horarias</h3>
+                <div className="flex justify-between items-center bg-slate-800 p-3 rounded-lg">
+                  <span className="flex gap-1">
+                    {DAYS.map(d => (
+                      <span key={d} className={`w-8 h-8 flex items-center justify-center rounded-md font-bold text-sm ${student.requestedDays.includes(d) ? 'bg-indigo-500 text-white' : 'bg-slate-700 text-slate-500'}`}>
+                        {d}
+                      </span>
+                    ))}
+                  </span>
+                  <span className="text-sm font-mono bg-slate-900 px-3 py-1 rounded-lg border border-slate-700">
+                    {student.requestedTimeStart} - {student.requestedTimeEnd}
+                  </span>
+                </div>
+              </section>
+
+              {/* Información Adicional de la Importación */}
+              <section>
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Información del Alumno</h3>
+                <div className="bg-slate-750 p-4 rounded-xl border border-slate-700 space-y-2 text-sm">
+                  <p><span className="font-semibold text-slate-400">Nivel / Experiencia:</span> <span className="text-white">{student.experience}</span></p>
+                  {extraDataEntries.length > 0 && (
+                    <div className="pt-2 mt-2 border-t border-slate-600">
+                      <p className="text-xs text-slate-500 font-bold mb-1 uppercase tracking-widest">Datos extraídos:</p>
+                      {extraDataEntries.map(([k, v]) => (
+                        <p key={k} className="mb-1"><span className="font-semibold text-slate-400">{k}:</span> <span className="text-slate-200">{String(v)}</span></p>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Clases Asignadas</h3>
+                {assignments.length > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    {assignments.map((a, i) => (
+                      <div key={i} className="flex items-center gap-3 bg-slate-700/50 p-3 rounded-lg border border-slate-600">
+                        <div className="w-10 h-10 rounded-full flex items-center justify-center font-bold text-white shadow-sm" style={{backgroundColor: a.teacher.color}}>
+                          {a.teacher.name.charAt(0)}
+                        </div>
+                        <div>
+                          <div className="font-semibold text-white">{a.teacher.name}</div>
+                          <div className="text-xs text-slate-400">{DAY_LABELS[a.day]} • {a.slotStart}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="p-4 border border-dashed border-slate-600 rounded-xl text-center text-slate-500 text-sm">
+                    Aún no tiene clases asignadas
+                  </div>
+                )}
+              </section>
+
+              {student.linkedIds.length > 0 && (
+                <section>
+                  <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg>
+                    Vínculos Familiares
+                  </h3>
+                  <div className="flex flex-col gap-2">
+                    {student.linkedIds.map(id => {
+                      const sibling = studentsMap.get(id);
+                      if (!sibling) return null;
+                      return (
+                        <div key={id} className="bg-slate-750 p-3 rounded-lg border border-slate-700 flex justify-between items-center">
+                          <span className="text-sm font-medium">{sibling.name} {sibling.surname}</span>
+                          <span className="text-xs bg-slate-600 px-2 py-1 rounded">{sibling.category}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              )}
+
+              <section className="mt-auto">
+                <h3 className="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-3">Contacto</h3>
+                <div className="flex flex-col gap-3">
+                  {student.contacts.map((c, i) => (
+                    <div key={i} className="bg-slate-800 p-3 rounded-xl border border-slate-700">
+                      <div className="text-xs font-bold text-indigo-400 mb-1">{c.role}</div>
+                      <div className="text-sm text-white">{c.name}</div>
+                      <div className="text-xs text-slate-400 flex justify-between mt-2">
+                        <span>📞 {c.phone}</span>
+                        <span>✉️ {c.email}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // COMPONENTE PRINCIPAL
+    // ─────────────────────────────────────────────────────────────
+    function App() {
+      const [students, setStudents] = useState(() => generateStudents());
+      const [teachers, setTeachers] = useState(INITIAL_TEACHERS);
+      const [activeDay, setActiveDay] = useState("L");
+      const [viewDate, setViewDate] = useState(() => new Date().toISOString().split('T')[0]);
+      
+      const [isCollapsed, setIsCollapsed] = useState(false);
+      const [searchTerm, setSearchTerm] = useState("");
+      const [selectedCat, setSelectedCat] = useState("Todos");
+      const [selectedStudent, setSelectedStudent] = useState(null);
+      const [toasts, setToasts] = useState([]);
+      const [draggedStudentId, setDraggedStudentId] = useState(null);
+      const [isDraggingFile, setIsDraggingFile] = useState(false);
+      
+      const [autoAssignOpen, setAutoAssignOpen] = useState(false);
+      const [addTeacherModalOpen, setAddTeacherModalOpen] = useState(false);
+      const [teacherToDelete, setTeacherToDelete] = useState(null);
+
+      const [isDbDropdownOpen, setIsDbDropdownOpen] = useState(false);
+      const [dbToDelete, setDbToDelete] = useState(null);
+
+      const initialMasterSlots = useMemo(() => {
+        const slots = [];
+        const addRange = (startH, startM, endH, endM) => {
+          let cur = startH * 60 + startM;
+          const end = endH * 60 + endM;
+          while (cur < end) {
+            const h = Math.floor(cur / 60);
+            const m = cur % 60;
+            const time = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+            DAYS.forEach(dia => {
+              slots.push({
+                id: `ts-${dia}-${time.replace(':','')}`,
+                dia,
+                hora: time,
+                activa: true,
+                bloqueada: false,
+                motivo: "",
+                profesoresDisponibles: []
+              });
+            });
+            cur += 120; // Saltos de 2 Horas
+          }
+        };
+        addRange(9, 0, 13, 0);
+        addRange(15, 0, 21, 0); 
+        return slots;
+      }, []);
+      
+      const [centerTimeSlots, setCenterTimeSlots] = useState(initialMasterSlots);
+
+      const toggleMasterTimeSlot = (id) => {
+        setCenterTimeSlots(prev => prev.map(ts => ts.id === id ? { ...ts, activa: !ts.activa } : ts));
+      };
+
+      const studentsMap = useMemo(() => {
+        const map = new Map();
+        students.forEach(s => map.set(s.id, s));
+        return map;
+      }, [students]);
+
+      const assignmentsMap = useMemo(() => {
+        const map = new Map(); 
+        teachers.forEach(t => {
+          DAYS.forEach(d => {
+            if (t.schedule[d].active) {
+              t.schedule[d].slots.forEach(slot => {
+                slot.studentIds.forEach(sid => {
+                  if (!map.has(sid)) map.set(sid, new Set());
+                  map.get(sid).add(d);
+                });
+              });
+            }
+          });
+        });
+        return map;
+      }, [teachers]);
+
+      const showToast = useCallback((text, type = "info") => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, text, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
+      }, []);
+
+      const visibleStudents = useMemo(() => {
+        return students.filter(s => {
+          const assignedDays = assignmentsMap.get(s.id) || new Set();
+          if (assignedDays.size >= s.requestedDays.length) return false;
+          if (selectedCat !== "Todos" && s.category !== selectedCat) return false;
+          if (searchTerm) {
+            const term = searchTerm.toLowerCase();
+            const fullName = `${s.name} ${s.surname}`.toLowerCase();
+            if (!fullName.includes(term)) return false;
+          }
+          return true;
+        });
+      }, [students, assignmentsMap, selectedCat, searchTerm]);
+
+      const onDragStart = (e, studentId) => {
+        e.dataTransfer.setData("studentId", studentId);
+        setDraggedStudentId(studentId);
+      };
+
+      const onDragEnd = () => setDraggedStudentId(null);
+      const onDragOver = (e) => { e.preventDefault(); e.currentTarget.classList.add('drag-active'); };
+      const onDragLeave = (e) => { e.currentTarget.classList.remove('drag-active'); };
+
+      // LÓGICA DE IMPORTACIÓN Y MAPEADO INTELIGENTE (Fuzzy Mapping)
+      const handleFileDrop = (e) => {
+        e.preventDefault();
+        setIsDraggingFile(false);
+        const file = e.dataTransfer.files?.[0];
+        if (!file) return;
+
+        const ext = file.name.split('.').pop().toLowerCase();
+
+        // 1. JSON Nativo
+        if (ext === 'json') {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            try {
+              const newStudents = JSON.parse(event.target.result);
+              if (Array.isArray(newStudents)) {
+                const formattedStudents = newStudents.map((s, idx) => ({
+                  id: s.id || `imp-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+                  name: s.name || "Importado",
+                  surname: s.surname || "Nuevo",
+                  age: s.age || 0,
+                  ageUnit: s.ageUnit || "años",
+                  category: s.category || "Niños",
+                  specialNeed: s.specialNeed || null,
+                  experience: s.experience || "Sin experiencia",
+                  requestedDays: s.requestedDays || ["L"],
+                  requestedTimeStart: s.requestedTimeStart || "16:00",
+                  requestedTimeEnd: s.requestedTimeEnd || "18:00",
+                  contacts: s.contacts || [],
+                  linkedIds: s.linkedIds || [],
+                  extraData: s.extraData || {}
+                }));
+                setStudents(prev => [...formattedStudents, ...prev]); 
+                showToast(`Se importaron ${formattedStudents.length} inscripciones de JSON`, "ok");
+              } else {
+                showToast("El archivo debe ser un array JSON de alumnos", "err");
+              }
+            } catch (error) {
+              showToast("Error al parsear el archivo JSON", "err");
+            }
+          };
+          reader.readAsText(file);
+        
+        // 2. EXCEL / CSV (Con mapeo dinámico)
+        } else if (['xlsx', 'xls', 'csv'].includes(ext)) {
+          showToast(`Leyendo datos desde Excel...`, "info");
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            try {
+              const data = new Uint8Array(event.target.result);
+              const workbook = XLSX.read(data, {type: 'array'});
+              const firstSheetName = workbook.SheetNames[0];
+              const worksheet = workbook.Sheets[firstSheetName];
+              const rawData = XLSX.utils.sheet_to_json(worksheet);
+
+              if (rawData.length === 0) {
+                 showToast("El archivo Excel está vacío", "err");
+                 return;
+              }
+
+              const formattedStudents = rawData.map((row, idx) => {
+                const rawName = findFuzzyKey(row, ['Nombre', 'name', 'Alumno', 'first name', 'nombres']) || "Importado";
+                const rawSurname = findFuzzyKey(row, ['Apellidos', 'Apellido', 'surname', 'last name']) || `Nº ${idx + 1}`;
+                const rawAge = parseInt(findFuzzyKey(row, ['Edad', 'age', 'Años'])) || 0;
+                const rawCat = findFuzzyKey(row, ['Categoría', 'Categoria', 'category', 'nivel', 'grupo']) || "Niños";
+                const rawStart = findFuzzyKey(row, ['Hora Inicio', 'Hora', 'desde', 'start', 'hora_inicio', 'preferencia']) || "16:00";
+                const rawEnd = findFuzzyKey(row, ['Hora Fin', 'hasta', 'end', 'hora_fin']) || "18:00";
+                const rawDays = findFuzzyKey(row, ['Días', 'Dias', 'days', 'disponibilidad', 'dias solicitados']);
+                const rawExperience = findFuzzyKey(row, ['Experiencia', 'nivel natacion', 'sabe nadar']);
+                const rawSpecialNeed = findFuzzyKey(row, ['Necesidades', 'Necesidad', 'specialNeed', 'observaciones medicas', 'patologia']);
+                
+                // Mapear el resto de columnas a extraData para no perder nada
+                const knownKeys = ['Nombre', 'name', 'Alumno', 'first name', 'nombres', 'Apellidos', 'Apellido', 'surname', 'last name', 'Edad', 'age', 'Años', 'Categoría', 'Categoria', 'category', 'nivel', 'grupo', 'Hora Inicio', 'Hora', 'desde', 'start', 'hora_inicio', 'preferencia', 'Hora Fin', 'hasta', 'end', 'hora_fin', 'Días', 'Dias', 'days', 'disponibilidad', 'dias solicitados', 'Experiencia', 'nivel natacion', 'sabe nadar', 'Necesidades', 'Necesidad', 'specialNeed', 'observaciones medicas', 'patologia'];
+                const extraData = {};
+                Object.keys(row).forEach(key => {
+                   if(!knownKeys.some(k => key.toLowerCase().includes(k.toLowerCase()))) {
+                      extraData[key] = row[key];
+                   }
+                });
+
+                return {
+                  id: `imp-xl-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+                  name: String(rawName),
+                  surname: String(rawSurname),
+                  age: rawAge,
+                  ageUnit: "años",
+                  category: ALL_CATEGORIES.includes(rawCat) ? rawCat : "Niños",
+                  specialNeed: rawSpecialNeed || null,
+                  experience: rawExperience || "Sin experiencia",
+                  requestedDays: parseDaysRequested(rawDays),
+                  requestedTimeStart: parseTimeRequested(rawStart, "16:00"),
+                  requestedTimeEnd: parseTimeRequested(rawEnd, "18:00"),
+                  contacts: [],
+                  linkedIds: [],
+                  extraData: extraData
+                };
+              });
+
+              setStudents(prev => [...formattedStudents, ...prev]);
+              showToast(`Éxito: Se extrajeron ${formattedStudents.length} inscripciones completas`, "ok");
+            } catch (error) {
+              console.error(error);
+              showToast("Error al procesar el Excel. Comprueba el formato de las celdas.", "err");
+            }
+          };
+          reader.readAsArrayBuffer(file);
+          
+        // 3. XML (Extracción nativa vía DOMParser)
+        } else if (ext === 'xml') {
+          showToast(`Procesando XML nativamente...`, "info");
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            try {
+              const parser = new DOMParser();
+              const xmlDoc = parser.parseFromString(event.target.result, "text/xml");
+              
+              // Buscamos cualquier nodo que pueda representar a un estudiante/fila
+              const items = xmlDoc.querySelectorAll("student, alumno, row, item, record, inscripcion");
+              if (items.length === 0) {
+                 showToast("No se detectaron registros compatibles en el XML", "err");
+                 return;
+              }
+
+              const formattedStudents = Array.from(items).map((node, idx) => {
+                 // Convertimos los nodos hijos en un objeto clave-valor para aplicar Fuzzy Mapping
+                 const row = {};
+                 Array.from(node.children).forEach(child => {
+                    row[child.tagName] = child.textContent;
+                 });
+
+                const rawName = findFuzzyKey(row, ['Nombre', 'name', 'Alumno', 'first name', 'nombres']) || "Importado XML";
+                const rawSurname = findFuzzyKey(row, ['Apellidos', 'Apellido', 'surname', 'last name']) || `Nº ${idx + 1}`;
+                const rawAge = parseInt(findFuzzyKey(row, ['Edad', 'age', 'Años'])) || 0;
+                const rawCat = findFuzzyKey(row, ['Categoría', 'Categoria', 'category', 'nivel', 'grupo']) || "Niños";
+                const rawStart = findFuzzyKey(row, ['Hora Inicio', 'Hora', 'desde', 'start', 'hora_inicio', 'preferencia']) || "16:00";
+                const rawEnd = findFuzzyKey(row, ['Hora Fin', 'hasta', 'end', 'hora_fin']) || "18:00";
+                const rawDays = findFuzzyKey(row, ['Días', 'Dias', 'days', 'disponibilidad', 'dias solicitados']);
+                const rawExperience = findFuzzyKey(row, ['Experiencia', 'nivel natacion', 'sabe nadar']);
+                const rawSpecialNeed = findFuzzyKey(row, ['Necesidades', 'Necesidad', 'specialNeed', 'observaciones']);
+
+                const knownKeys = ['Nombre', 'name', 'Alumno', 'first name', 'nombres', 'Apellidos', 'Apellido', 'surname', 'last name', 'Edad', 'age', 'Años', 'Categoría', 'Categoria', 'category', 'nivel', 'grupo', 'Hora Inicio', 'Hora', 'desde', 'start', 'hora_inicio', 'preferencia', 'Hora Fin', 'hasta', 'end', 'hora_fin', 'Días', 'Dias', 'days', 'disponibilidad', 'dias solicitados', 'Experiencia', 'nivel natacion', 'sabe nadar', 'Necesidades', 'Necesidad', 'specialNeed', 'observaciones'];
+                const extraData = {};
+                Object.keys(row).forEach(key => {
+                   if(!knownKeys.some(k => key.toLowerCase().includes(k.toLowerCase()))) {
+                      extraData[key] = row[key];
+                   }
+                });
+
+                 return {
+                  id: `imp-xml-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+                  name: String(rawName),
+                  surname: String(rawSurname),
+                  age: rawAge,
+                  ageUnit: "años",
+                  category: ALL_CATEGORIES.includes(rawCat) ? rawCat : "Niños",
+                  specialNeed: rawSpecialNeed || null,
+                  experience: rawExperience || "Sin experiencia",
+                  requestedDays: parseDaysRequested(rawDays),
+                  requestedTimeStart: parseTimeRequested(rawStart, "16:00"),
+                  requestedTimeEnd: parseTimeRequested(rawEnd, "18:00"),
+                  contacts: [],
+                  linkedIds: [],
+                  extraData: extraData
+                };
+              });
+
+              setStudents(prev => [...formattedStudents, ...prev]);
+              showToast(`Éxito: Se extrajeron ${formattedStudents.length} inscripciones de XML`, "ok");
+            } catch (err) {
+               showToast("Error al procesar el archivo XML", "err");
+            }
+          };
+          reader.readAsText(file);
+          
+        // 4. PDF (Notificación y fallback)
+        } else if (ext === 'pdf') {
+          showToast(`⚠️ Para una importación completa y precisa de PDF utiliza un conversor a Excel (.xlsx). Extrayendo texto base...`, "info");
+          // Para PDF en cliente puro la fiabilidad textual es baja sin la carga pesada de pdf.js.
+          // Se mantiene una simulación de fallback de captura básica, el usuario debe preferir excel.
+          setTimeout(() => {
+            const mockStudents = Array.from({length: 5}, (_, idx) => ({
+              id: `imp-${ext}-${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 4)}`,
+              name: `Alumno (PDF)`,
+              surname: `Extraído ${idx + 1}`,
+              age: 8,
+              ageUnit: "años",
+              category: "Niños",
+              specialNeed: null,
+              experience: "Sin experiencia",
+              requestedDays: ["L", "X"],
+              requestedTimeStart: "16:00",
+              requestedTimeEnd: "18:00",
+              contacts: [],
+              linkedIds: [],
+              extraData: { "Nota": "Importación desde PDF incompleta. Se recomienda Excel." }
+            }));
+            setStudents(prev => [...mockStudents, ...prev]);
+          }, 2000);
+        } else {
+          showToast("Formato no soportado. Usa Excel (.xlsx), CSV, XML o JSON.", "err");
+        }
+      };
+
+      const onDropSlot = (e, teacherId, day, slotId) => {
+        e.preventDefault();
+        e.currentTarget.classList.remove('drag-active');
+        
+        const studentId = e.dataTransfer.getData("studentId");
+        if (!studentId) return;
+        const student = studentsMap.get(studentId);
+        if (!student) return;
+
+        setTeachers(prev => {
+          const next = JSON.parse(JSON.stringify(prev));
+          const t = next.find(x => x.id === teacherId);
+          const s = t.schedule[day].slots.find(x => x.id === slotId);
+
+          const limit = RATIO_LIMITS[student.category] || 4;
+          if (s.studentIds.length >= limit) {
+            showToast(`La clase está llena (Máx ${limit})`, "err");
+            return prev;
+          }
+
+          if (!t.specialties.includes(student.category)) {
+            showToast(`${t.name} no da clases de ${student.category}`, "err");
+            return prev;
+          }
+
+          let alreadyOnDay = false;
+          next.forEach(teacher => {
+            if (teacher.schedule[day].active) {
+              teacher.schedule[day].slots.forEach(slot => {
+                if (slot.studentIds.includes(studentId) && slot.id !== slotId) {
+                  slot.studentIds = slot.studentIds.filter(id => id !== studentId);
+                } else if (slot.studentIds.includes(studentId)) {
+                  alreadyOnDay = true;
+                }
+              });
+            }
+          });
+
+          if (alreadyOnDay) return prev; 
+          s.studentIds.push(studentId);
+          showToast(`Asignado a ${t.name}`, "ok");
+          return next;
+        });
+      };
+
+      const removeStudentFromSlot = (e, teacherId, day, slotId, studentId) => {
+        e.stopPropagation(); 
+        setTeachers(prev => {
+          const next = JSON.parse(JSON.stringify(prev));
+          const t = next.find(x => x.id === teacherId);
+          const s = t.schedule[day].slots.find(x => x.id === slotId);
+          s.studentIds = s.studentIds.filter(id => id !== studentId);
+          return next;
+        });
+        showToast("Alumno retirado de la clase", "info");
+      };
+
+      const handleAutoAssign = (count) => {
+        setTeachers(prevTeachers => {
+          let nextTeachers = JSON.parse(JSON.stringify(prevTeachers));
+          let assignmentsMade = 0;
+          let studentsProcessed = 0;
+
+          const getAssignments = (tState) => {
+            const map = new Map();
+            tState.forEach(t => {
+              DAYS.forEach(d => {
+                if (t.schedule[d].active) {
+                  t.schedule[d].slots.forEach(slot => {
+                    slot.studentIds.forEach(sid => {
+                      if (!map.has(sid)) map.set(sid, new Set());
+                      map.get(sid).add(d);
+                    });
+                  });
+                }
+              });
+            });
+            return map;
+          };
+
+          let currentAssignmentsMap = getAssignments(nextTeachers);
+          const pendingStudents = students.filter(s => {
+            const assignedDays = currentAssignmentsMap.get(s.id) || new Set();
+            return assignedDays.size < s.requestedDays.length;
+          });
+
+          for (const student of pendingStudents) {
+            if (studentsProcessed >= count) break;
+            
+            let studentAssignedInThisLoop = false;
+            const assignedDays = currentAssignmentsMap.get(student.id) || new Set();
+            const reqStartMin = timeToMinutes(student.requestedTimeStart);
+            
+            for (const day of student.requestedDays) {
+              if (assignedDays.has(day)) continue; 
+              
+              let bestSlot = null;
+              
+              for (const teacher of nextTeachers) {
+                if (!isTeacherActiveOnDate(teacher, viewDate)) continue;
+                if (!teacher.schedule[day].active) continue;
+                if (!teacher.specialties.includes(student.category)) continue; 
+                
+                const slots = teacher.schedule[day].slots;
+                const slotTimes = computeSlotTimes(slots, teacher.schedule[day].startTime);
+                
+                for (let i = 0; i < slots.length; i++) {
+                  const slot = slots[i];
+                  const slotTime = slotTimes[i];
+                  
+                  const globalSlot = centerTimeSlots.find(ts => ts.dia === day && ts.hora === slotTime.start);
+                  if (!globalSlot || !globalSlot.activa || globalSlot.bloqueada) continue;
+
+                  const stMin = timeToMinutes(slotTime.start);
+                  const isMorning = stMin < 14 * 60; 
+                  const teacherTurnos = teacher.schedule[day].turnos || { manana: true, tarde: true };
+                  if (isMorning && !teacherTurnos.manana) continue;
+                  if (!isMorning && !teacherTurnos.tarde) continue;
+
+                  const limit = RATIO_LIMITS[student.category] || 4;
+                  
+                  if (slot.studentIds.length >= limit) continue;
+                  if (slot.studentIds.length > 0) {
+                     const firstStudent = studentsMap.get(slot.studentIds[0]);
+                     if (firstStudent && firstStudent.category !== student.category) continue;
+                  }
+
+                  const timeDiff = Math.abs(stMin - reqStartMin);
+                  
+                  if (!bestSlot || timeDiff < bestSlot.timeDiff) {
+                    bestSlot = { slot, timeDiff };
+                  }
+                }
+              }
+              
+              if (bestSlot) {
+                bestSlot.slot.studentIds.push(student.id);
+                assignedDays.add(day);
+                
+                if (!currentAssignmentsMap.has(student.id)) currentAssignmentsMap.set(student.id, new Set());
+                currentAssignmentsMap.get(student.id).add(day);
+                
+                assignmentsMade++;
+                studentAssignedInThisLoop = true;
+              }
+            }
+            if (studentAssignedInThisLoop) studentsProcessed++;
+          }
+          
+          if (assignmentsMade > 0) {
+            showToast(`🚀 Éxito: Se asignaron ${assignmentsMade} huecos a ${studentsProcessed} alumnos`, "ok");
+          } else {
+            showToast("No se encontraron huecos compatibles (Horario/Día/Especialidad)", "info");
+          }
+          
+          return nextTeachers;
+        });
+      };
+
+      const handleSaveTeacher = (data) => {
+        const newId = `t-${Date.now()}`;
+        const newSchedule = {};
+        DAYS.forEach(d => {
+          newSchedule[d] = makeDaySchedule(true, "15:00", "21:00");
+        });
+
+        const newTeacher = {
+          id: newId,
+          name: data.name,
+          color: data.color,
+          congelado: false,
+          specialties: data.specialties,
+          fechaInicio: data.startDate || null,
+          fechaFin: data.endDate || null,
+          obs: data.obs,
+          schedule: newSchedule
+        };
+
+        setTeachers(prev => [...prev, newTeacher]);
+        setAddTeacherModalOpen(false);
+        showToast("Profesor añadido correctamente", "ok");
+      };
+
+      const toggleFreezeTeacher = (id) => {
+        setTeachers(prev => prev.map(t => t.id === id ? { ...t, congelado: !t.congelado } : t));
+      };
+
+      const toggleTeacherTurno = (teacherId, day, turno) => {
+        setTeachers(prev => prev.map(t => {
+          if (t.id === teacherId) {
+            const nextSched = JSON.parse(JSON.stringify(t.schedule));
+            if (!nextSched[day].turnos) nextSched[day].turnos = { manana: true, tarde: true };
+            
+            const isTurningOn = !nextSched[day].turnos[turno];
+            nextSched[day].turnos[turno] = isTurningOn;
+            
+            if (isTurningOn) {
+               const ranges = turno === 'manana' 
+                  ? [{start: "09:00", dur: 120}, {start: "11:00", dur: 120}] 
+                  : [{start: "15:00", dur: 120}, {start: "17:00", dur: 120}, {start: "19:00", dur: 120}];
+               
+               let currentTimes = computeSlotTimes(nextSched[day].slots, nextSched[day].startTime);
+               
+               nextSched[day].slots.forEach((s, idx) => {
+                 if (!s.startTime) s.startTime = currentTimes[idx].start;
+               });
+
+               ranges.forEach(r => {
+                  const exists = currentTimes.some(ct => ct.start === r.start);
+                  if (!exists) {
+                     nextSched[day].slots.push({
+                        id: generateSlotId(),
+                        studentIds: [],
+                        manualDeltaMin: 0,
+                        baseDur: r.dur,
+                        startTime: r.start
+                     });
+                  }
+               });
+
+               nextSched[day].slots.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
+               if (nextSched[day].slots.length > 0) {
+                 nextSched[day].startTime = nextSched[day].slots[0].startTime;
+                 const lastSlot = nextSched[day].slots[nextSched[day].slots.length - 1];
+                 const endMin = timeToMinutes(lastSlot.startTime) + slotDuration(lastSlot);
+                 nextSched[day].endTime = minutesToTime(endMin);
+               }
+            }
+            return { ...t, schedule: nextSched };
+          }
+          return t;
+        }));
+      };
+
+      const confirmDeleteTeacherDay = (id, name) => {
+        setTeacherToDelete({ id, name });
+      };
+
+      const executeDeleteTeacherDay = () => {
+        if (!teacherToDelete) return;
+        setTeachers(prev => prev.map(t => {
+          if (t.id === teacherToDelete.id) {
+            const nextSched = JSON.parse(JSON.stringify(t.schedule));
+            nextSched[activeDay].slots.forEach(slot => { slot.studentIds = []; });
+            nextSched[activeDay].active = false;
+            return { ...t, schedule: nextSched };
+          }
+          return t;
+        }));
+        showToast(`Profesor eliminado del día ${DAY_LABELS[activeDay]}`, "ok");
+        setTeacherToDelete(null);
+      };
+
+      const requestDeleteDb = (type) => {
+        setDbToDelete(type);
+        setIsDbDropdownOpen(false);
+      };
+
+      const confirmDeleteDb = () => {
+        if (dbToDelete === 'students') {
+          setStudents([]);
+          showToast("Base de datos de alumnos borrada", "ok");
+        } else if (dbToDelete === 'teachers') {
+          setTeachers([]);
+          showToast("Base de datos de profesores borrada", "ok");
+        } else if (dbToDelete === 'all') {
+          setStudents([]);
+          setTeachers([]);
+          showToast("Toda la base de datos ha sido borrada", "ok");
+        }
+        setDbToDelete(null);
+      };
+
+      const orderedActiveTeachers = useMemo(() => {
+        const activeT = teachers.filter(t => t.schedule[activeDay].active && isTeacherActiveOnDate(t, viewDate));
+        const frozen = activeT.filter(t => t.congelado);
+        const unfrozen = activeT.filter(t => !t.congelado);
+        return { list: [...frozen, ...unfrozen], frozenCount: frozen.length };
+      }, [teachers, activeDay, viewDate]);
+
+      const activeDayMasterSlots = useMemo(() => {
+        return centerTimeSlots
+          .filter(ts => ts.dia === activeDay)
+          .sort((a,b) => timeToMinutes(a.hora) - timeToMinutes(b.hora));
+      }, [centerTimeSlots, activeDay]);
+
+      const isCoveredBySlot = useCallback((masterHora, slots, slotTimes) => {
+        const masterMin = timeToMinutes(masterHora);
+        return slots.some((s, idx) => {
+           const startMin = timeToMinutes(slotTimes[idx].start);
+           const endMin = timeToMinutes(slotTimes[idx].end);
+           return masterMin > startMin && masterMin < endMin;
+        });
+      }, []);
+
+      return (
+        <div className="flex flex-col h-screen w-full font-sans bg-slate-900 text-slate-100 overflow-hidden">
+          {/* TOP NAVBAR */}
+          <header className="h-16 bg-slate-800 border-b border-slate-700 flex items-center justify-between px-6 shrink-0 z-40 shadow-md relative">
+            <div className="flex items-center gap-4">
+              <div className="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20">
+                CR
+              </div>
+              <h1 className="text-lg font-bold text-white tracking-wide">Cribado <span className="text-slate-400 font-medium text-sm">| Horario & Cribado</span></h1>
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="hidden lg:flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-lg border border-slate-700" title="Fecha de visualización del cuadrante">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" className="text-slate-400" strokeWidth="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                <input type="date" value={viewDate} onChange={e => setViewDate(e.target.value)} className="bg-transparent text-sm text-slate-300 focus:outline-none cursor-pointer" />
+              </div>
+
+              <div className="flex bg-slate-900 rounded-xl p-1 border border-slate-700 shadow-inner">
+                {DAYS.map(d => (
+                  <button
+                    key={d}
+                    onClick={() => setActiveDay(d)}
+                    className={`px-6 py-1.5 rounded-lg text-sm font-semibold transition-all duration-200 ${
+                      activeDay === d 
+                        ? 'bg-blue-500 text-white shadow-md' 
+                        : 'text-slate-400 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    {DAY_LABELS[d]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex gap-3 relative items-center">
+              <button 
+                onClick={() => setAddTeacherModalOpen(true)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 rounded-lg text-sm font-medium transition-colors border border-emerald-500 shadow-sm flex items-center gap-2 text-white"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                Añadir Profesor
+              </button>
+
+              <div className="relative">
+                <button 
+                  onClick={() => setIsDbDropdownOpen(!isDbDropdownOpen)}
+                  className="px-3 py-2 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-medium transition-colors border border-rose-500 shadow-sm flex items-center gap-1.5 text-white"
+                  title="Borrar Base de Datos"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                  BD
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+
+                {isDbDropdownOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setIsDbDropdownOpen(false)}></div>
+                    <div className="absolute right-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl py-2 z-50 animate-slide-in">
+                      <button onClick={() => requestDeleteDb('students')} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2"><span>👥</span> Borrar Alumnos</button>
+                      <button onClick={() => requestDeleteDb('teachers')} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200 flex items-center gap-2"><span>👨‍🏫</span> Borrar Profesores</button>
+                      <button onClick={() => requestDeleteDb('all')} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm font-semibold text-rose-400 border-t border-slate-700 mt-1 pt-3 flex items-center gap-2"><span>⚠️</span> Borrar Todo</button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="relative">
+                <button 
+                  onClick={() => setAutoAssignOpen(!autoAssignOpen)}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded-lg text-sm font-medium transition-colors border border-blue-500 shadow-sm flex items-center gap-2 text-white"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+                  Autoasignar
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M6 9l6 6 6-6"/></svg>
+                </button>
+
+                {autoAssignOpen && (
+                  <>
+                    <div className="fixed inset-0 z-40" onClick={() => setAutoAssignOpen(false)}></div>
+                    <div className="absolute right-0 mt-2 w-52 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl py-2 z-50 animate-slide-in">
+                      <button onClick={() => { handleAutoAssign(10); setAutoAssignOpen(false); }} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200">✨ Asignar 10 alumnos</button>
+                      <button onClick={() => { handleAutoAssign(50); setAutoAssignOpen(false); }} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm text-slate-200">🚀 Asignar 50 alumnos</button>
+                      <button onClick={() => { handleAutoAssign(Infinity); setAutoAssignOpen(false); }} className="w-full text-left px-4 py-2 hover:bg-slate-700 text-sm font-semibold text-blue-400 border-t border-slate-700 mt-1 pt-3">🔥 Asignar todas</button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <button className="p-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm font-medium transition-colors border border-slate-600 shadow-sm flex items-center justify-center text-slate-300" title="Exportar cuadrante">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+              </button>
+            </div>
+          </header>
+
+          <div className="flex flex-1 overflow-hidden relative z-0">
+            {/* SIDEBAR: PENDIENTES CON DRAG & DROP EN TODA LA SUPERFICIE */}
+            <aside 
+              onDragOver={(e) => { e.preventDefault(); setIsDraggingFile(true); }}
+              onDragLeave={() => setIsDraggingFile(false)}
+              onDrop={handleFileDrop}
+              className={`bg-slate-800/50 border-r border-slate-700 flex flex-col shrink-0 z-30 transition-all duration-200 relative ${isCollapsed ? 'w-16' : 'w-[320px]'}`}
+            >
+              {isDraggingFile && (
+                <div className="absolute inset-0 bg-blue-600/20 backdrop-blur-xs border-2 border-dashed border-blue-500 rounded-xl m-2 flex flex-col items-center justify-center p-4 text-center z-50 animate-fade-in pointer-events-none">
+                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-blue-400 mb-2 animate-bounce"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+                  <span className="text-xs font-bold text-white uppercase tracking-wider">Suelta el archivo aquí</span>
+                  <span className="text-[10px] text-slate-300 mt-1">Soporta Excel, CSV, XML y JSON</span>
+                </div>
+              )}
+
+              <div className="p-4 border-b border-slate-700/50 space-y-4">
+                <div className={`flex items-center ${isCollapsed ? 'justify-center' : 'justify-between'}`}>
+                  {!isCollapsed && (
+                    <h2 className="text-sm font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+                      Pendientes
+                      <span className="bg-blue-500/20 text-blue-400 px-2 rounded-full">{visibleStudents.length}</span>
+                    </h2>
+                  )}
+                  <button onClick={() => setIsCollapsed(!isCollapsed)} className="p-1 hover:bg-slate-700 rounded text-slate-400 transition-colors">
+                    {isCollapsed ? (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>
+                    )}
+                  </button>
+                </div>
+                {!isCollapsed && (
+                  <>
+                    <div className="relative">
+                      <svg className="absolute left-3 top-2.5 text-slate-500" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.3-4.3"/></svg>
+                      <input
+                        type="text"
+                        placeholder="Buscar alumno..."
+                        value={searchTerm}
+                        onChange={e => setSearchTerm(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg pl-9 pr-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all"
+                      />
+                    </div>
+                    <select
+                      value={selectedCat}
+                      onChange={e => setSelectedCat(e.target.value)}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 appearance-none cursor-pointer"
+                    >
+                      <option value="Todos">Todas las categorías</option>
+                      {ALL_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+
+                    <div className="mt-2 border-2 border-dashed border-slate-700 hover:border-slate-500 text-slate-500 hover:text-slate-400 rounded-lg p-3 text-center transition-colors flex flex-col items-center justify-center gap-1.5 pointer-events-none">
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+                      <span className="text-[10px] uppercase font-bold tracking-wider">
+                        Arrastra un JSON, PDF, XML o Excel aquí
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-3 space-y-2 relative">
+                {visibleStudents.map(student => {
+                  const cs = CAT_STYLE[student.category] || { bg: "#f3f4f6", border: "#e5e7eb", darkText: "#1f2937" };
+                  const isDragged = draggedStudentId === student.id;
+                  
+                  return (
+                    <div
+                      key={student.id}
+                      draggable
+                      onDragStart={(e) => onDragStart(e, student.id)}
+                      onDragEnd={onDragEnd}
+                      onClick={() => setSelectedStudent(student)}
+                      className={`p-3 rounded-xl border cursor-grab active:cursor-grabbing hover:shadow-lg transition-all ${
+                        isDragged ? 'opacity-40 border-dashed' : 'bg-slate-800 border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {isCollapsed ? (
+                        <div className="text-center font-bold text-white text-xs cursor-pointer" title={`${student.name} ${student.surname}\n${student.category}\n${student.requestedTimeStart}`}>
+                          {student.name.charAt(0)}{student.surname.charAt(0)}
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex justify-between items-start mb-2">
+                            <div className="font-semibold text-sm leading-tight max-w-[70%] text-white">{student.name} <br/><span className="text-slate-400">{student.surname}</span></div>
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full shadow-sm whitespace-nowrap" style={{ backgroundColor: cs.bg, color: cs.darkText }}>
+                              {student.category}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2 mt-3">
+                            <span className="text-xs text-slate-400 font-mono bg-slate-900 px-1.5 py-0.5 rounded">{student.requestedTimeStart}</span>
+                            {student.requestedDays.map(d => (
+                               <span key={d} className={`text-[10px] font-bold w-5 h-5 flex items-center justify-center rounded-sm ${d === activeDay ? 'bg-blue-500 text-white' : 'bg-slate-700 text-slate-400'}`}>
+                                 {d}
+                               </span>
+                            ))}
+                            {student.specialNeed && <span title={student.specialNeed} className="ml-auto text-xs">⚠️</span>}
+                            {student.linkedIds.length > 0 && <span title="Tiene hermanos" className="ml-1 text-xs text-indigo-400"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="inline"><path d="M10 13a5 5 0 007.54.54l3-3a5 5 0 00-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 00-7.54-.54l-3 3a5 5 0 007.07 7.07l1.71-1.71"/></svg></span>}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+                {visibleStudents.length === 0 && !isCollapsed && (
+                  <div className="text-center text-slate-500 mt-10 text-sm">
+                    No hay alumnos pendientes para esta selección.
+                  </div>
+                )}
+              </div>
+            </aside>
+
+            {/* MAIN GRID */}
+            <main className="flex-1 overflow-x-auto overflow-y-auto bg-slate-900/80 p-6 relative z-10 custom-scrollbar">
+              <div className="inline-flex gap-4 pb-10">
+                
+                {/* COLUMNA MASTER DE FRANJAS HORARIAS */}
+                <div className="w-[110px] shrink-0 flex flex-col bg-slate-800/90 rounded-2xl border border-slate-700/50 shadow-xl sticky left-0 z-30">
+                  <div className="h-[74px] p-3 border-b border-slate-700 bg-slate-800 rounded-t-2xl flex items-center justify-center shrink-0">
+                    <span className="font-bold text-slate-300 text-xs text-center uppercase tracking-wider leading-tight">Franjas<br/><span className="text-blue-400 font-mono text-[10px]">(2 Horas)</span></span>
+                  </div>
+                  <div className="p-2 flex flex-col gap-2 flex-1 rounded-b-2xl">
+                    {activeDayMasterSlots.map(ts => (
+                      <div key={ts.id} className={`h-[120px] shrink-0 rounded-lg border flex flex-col items-center justify-center p-2 transition-all ${ts.activa ? 'bg-slate-700/50 border-slate-600 shadow-inner' : 'bg-slate-900/80 border-slate-800 opacity-70'}`}>
+                        <span className={`text-sm font-mono font-bold mb-3 ${ts.activa ? 'text-white' : 'text-slate-500 line-through'}`}>{ts.hora}</span>
+                        <button 
+                          onClick={() => toggleMasterTimeSlot(ts.id)}
+                          className={`w-12 h-6 rounded-full relative transition-colors shadow-sm ${ts.activa ? 'bg-blue-500 hover:bg-blue-400' : 'bg-slate-600 hover:bg-slate-500'}`}
+                          title={ts.activa ? "Deshabilitar franja en todo el centro" : "Habilitar franja"}
+                        >
+                          <span className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-all ${ts.activa ? 'left-7 shadow-md' : 'left-1'}`}></span>
+                        </button>
+                        <span className={`text-[10px] mt-2 font-medium uppercase tracking-wider ${ts.activa ? 'text-blue-300' : 'text-slate-500'}`}>{ts.activa ? 'Activa' : 'Inactiva'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {orderedActiveTeachers.list.map((teacher, index) => {
+                  const schedule = teacher.schedule[activeDay];
+                  const slotTimes = computeSlotTimes(schedule.slots, schedule.startTime);
+
+                  const teacherSlotsByTime = {};
+                  schedule.slots.forEach((slot, i) => {
+                    const time = slotTimes[i];
+                    if(time) teacherSlotsByTime[time.start] = { slot, time };
+                  });
+
+                  const isFrozen = teacher.congelado;
+                  const leftOffset = isFrozen ? 126 + (index * (280 + 16)) : 'auto';
+                  const isTemporary = teacher.fechaInicio || teacher.fechaFin;
+
+                  return (
+                    <div 
+                      key={teacher.id} 
+                      className={`w-[280px] shrink-0 flex flex-col bg-slate-800/40 rounded-2xl border transition-all ${isFrozen ? 'border-indigo-500/50 shadow-[0_0_20px_rgba(99,102,241,0.2)] z-20' : 'border-slate-700/50 shadow-sm z-10'}`}
+                      style={{ 
+                        position: isFrozen ? 'sticky' : 'relative', 
+                        left: isFrozen ? `${leftOffset}px` : 'auto'
+                      }}
+                    >
+                      {/* Teacher Header */}
+                      <div className="h-[74px] p-4 border-b border-slate-700 bg-slate-800 flex items-center justify-between rounded-t-2xl relative group shrink-0">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold text-white shadow-sm shrink-0" style={{backgroundColor: teacher.color}}>
+                            {teacher.name.charAt(0)}
+                          </div>
+                          <div className="overflow-hidden">
+                            <div className="font-bold text-white flex items-center gap-2">
+                              <span className="truncate">{teacher.name}</span>
+                              {isTemporary && <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded border border-amber-500/30 uppercase tracking-wider" title={`Contrato desde ${teacher.fechaInicio || 'Inicio'} hasta ${teacher.fechaFin || 'Fin'}`}>Temp</span>}
+                              
+                              <button onClick={() => toggleTeacherTurno(teacher.id, activeDay, 'manana')} className={`text-[10px] transition-all flex items-center justify-center w-5 h-5 rounded hover:bg-slate-700 ${schedule.turnos?.manana !== false ? 'opacity-100' : 'opacity-30 grayscale'}`} title={schedule.turnos?.manana !== false ? "Desactivar Mañana" : "Activar Mañana"}>☀️</button>
+                              <button onClick={() => toggleTeacherTurno(teacher.id, activeDay, 'tarde')} className={`text-[10px] transition-all flex items-center justify-center w-5 h-5 rounded hover:bg-slate-700 ${schedule.turnos?.tarde !== false ? 'opacity-100' : 'opacity-30 grayscale'}`} title={schedule.turnos?.tarde !== false ? "Desactivar Tarde" : "Activar Tarde"}>🌙</button>
+                            </div>
+                            <div className="text-xs text-slate-400 truncate" title={teacher.specialties.join(", ")}>
+                              {teacher.specialties.length} categorías
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col gap-1 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity absolute right-2 top-2 bg-slate-800 rounded shadow-md border border-slate-700 p-0.5">
+                          <button onClick={() => toggleFreezeTeacher(teacher.id)} className={`p-1.5 rounded transition-colors ${isFrozen ? 'bg-indigo-500 text-white' : 'hover:bg-slate-700 text-slate-400 hover:text-white'}`} title={isFrozen ? 'Descongelar columna' : 'Congelar columna'}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                          </button>
+                          <button onClick={() => confirmDeleteTeacherDay(teacher.id, teacher.name)} className="p-1.5 rounded text-rose-400 hover:bg-rose-500 hover:text-white transition-colors" title="Eliminar profesor de este día">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 6h18M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Slots */}
+                      <div className="p-2 flex flex-col gap-2 flex-1 bg-slate-900/20 rounded-b-2xl">
+                        {activeDayMasterSlots.map(masterSlot => {
+                          const stMin = timeToMinutes(masterSlot.hora);
+                          const isMorning = stMin < 14 * 60;
+                          const teacherTurnos = schedule.turnos || { manana: true, tarde: true };
+                          const isTeacherTurnoActive = isMorning ? teacherTurnos.manana !== false : teacherTurnos.tarde !== false;
+                          
+                          if (!isTeacherTurnoActive) {
+                             return <div key={`empty-${masterSlot.id}`} className="h-[120px] shrink-0 border border-transparent rounded-lg transition-all"></div>;
+                          }
+
+                          const tSlotData = teacherSlotsByTime[masterSlot.hora];
+                          
+                          if (!tSlotData) {
+                             if (isCoveredBySlot(masterSlot.hora, schedule.slots, slotTimes)) {
+                                return null;
+                             }
+                             return <div key={`empty-${masterSlot.id}`} className="h-[120px] shrink-0 border border-transparent rounded-lg transition-all"></div>;
+                          }
+
+                          const { slot, time } = tSlotData;
+                          const isGlobalActive = masterSlot.activa; 
+                          const isSlotUsable = isGlobalActive;
+
+                          const firstStudent = slot.studentIds.length > 0 ? studentsMap.get(slot.studentIds[0]) : null;
+                          const slotCategory = firstStudent ? firstStudent.category : null;
+                          const limit = slotCategory ? RATIO_LIMITS[slotCategory] : 4;
+                          const isFull = slot.studentIds.length >= limit;
+
+                          const span = slot.baseDur / 120;
+                          const heightPx = 120 * span + 8 * (span - 1);
+
+                          return (
+                            <div 
+                              key={slot.id}
+                              style={{ height: `${heightPx}px` }}
+                              onDragOver={isSlotUsable ? onDragOver : undefined}
+                              onDragLeave={isSlotUsable ? onDragLeave : undefined}
+                              onDrop={isSlotUsable ? (e) => onDropSlot(e, teacher.id, activeDay, slot.id) : undefined}
+                              className={`shrink-0 rounded-xl p-3 transition-all relative group flex flex-col border ${isSlotUsable ? 'bg-slate-800 border-slate-600 hover:border-slate-500 shadow-sm' : 'bg-slate-900/40 border-slate-800/50 opacity-40'}`}
+                            >
+                              <div className="flex justify-between items-center mb-3">
+                                <span className={`text-[11px] font-mono font-bold px-1.5 py-0.5 rounded shadow-inner ${isSlotUsable ? 'text-slate-300 bg-slate-700/50' : 'text-slate-500 line-through bg-transparent'}`}>
+                                  {time.start} - {time.end}
+                                </span>
+                                {isSlotUsable ? (
+                                  <div className="flex gap-1">
+                                    {Array.from({ length: limit }).map((_, idx) => (
+                                      <div key={idx} className={`w-2 h-2 rounded-full ${idx < slot.studentIds.length ? (isFull ? 'bg-rose-500' : 'bg-emerald-500') : 'bg-slate-700 shadow-inner'}`}></div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-[9px] text-rose-400 font-bold uppercase tracking-wider border border-rose-500/30 px-1 rounded bg-rose-500/10">Deshabilitada</span>
+                                )}
+                              </div>
+
+                              <div className="space-y-2 flex-1 overflow-y-auto custom-scrollbar pr-1 relative">
+                                {slot.studentIds.length === 0 && isSlotUsable && (
+                                  <div className="absolute inset-0 flex items-center justify-center text-[10px] text-slate-500 font-medium border-2 border-dashed border-slate-700/50 rounded-lg pointer-events-none">
+                                    Arrastra alumnos aquí
+                                  </div>
+                                )}
+                                {slot.studentIds.map(sid => {
+                                  const s = studentsMap.get(sid);
+                                  if (!s) return null;
+                                  const cs = CAT_STYLE[s.category];
+                                  return (
+                                    <div 
+                                      key={sid}
+                                      onClick={() => setSelectedStudent(s)}
+                                      className={`group/student relative bg-slate-800 border ${isSlotUsable ? 'border-slate-600 hover:border-slate-400' : 'border-slate-700'} rounded-lg p-2 text-sm flex justify-between items-center cursor-pointer transition-colors shadow-sm`}
+                                    >
+                                      <div className="truncate pr-6 leading-tight">
+                                        <div className={`font-semibold text-xs truncate ${isSlotUsable ? 'text-slate-200' : 'text-slate-400'}`}>{s.name} {s.surname}</div>
+                                        <div className="text-[10px] opacity-80" style={{ color: cs.border }}>{s.category}</div>
+                                      </div>
+                                      
+                                      {isSlotUsable && (
+                                        <button 
+                                          onClick={(e) => removeStudentFromSlot(e, teacher.id, activeDay, slot.id, sid)}
+                                          className="absolute right-2 top-1/2 -translate-y-1/2 w-6 h-6 rounded bg-rose-500/10 text-rose-400 opacity-0 group-hover/student:opacity-100 hover:bg-rose-500 hover:text-white flex items-center justify-center transition-all"
+                                          title="Eliminar de la clase"
+                                        >
+                                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </main>
+          </div>
+
+          <InfoPanel 
+            student={selectedStudent} 
+            onClose={() => setSelectedStudent(null)} 
+            studentsMap={studentsMap}
+            teachers={teachers}
+          />
+          <TeacherModal
+            isOpen={addTeacherModalOpen}
+            onClose={() => setAddTeacherModalOpen(false)}
+            onSave={handleSaveTeacher}
+            activeDay={activeDay}
+          />
+          <ConfirmModal
+            isOpen={!!teacherToDelete}
+            title="Eliminar profesor del día"
+            message={`¿Estás seguro de eliminar a ${teacherToDelete?.name} del cuadrante del ${DAY_LABELS[activeDay]}? Se desasignarán los alumnos de esta sesión, pero no se borrará del historial.`}
+            onConfirm={executeDeleteTeacherDay}
+            onCancel={() => setTeacherToDelete(null)}
+          />
+          <ConfirmModal
+            isOpen={!!dbToDelete}
+            title="Borrar Base de Datos"
+            message={`¿Estás seguro de que deseas borrar ${dbToDelete === 'all' ? 'TODA la base de datos (Alumnos y Profesores)' : (dbToDelete === 'students' ? 'todos los alumnos pendientes' : 'todos los profesores configurados')}? Esta acción no se puede deshacer.`}
+            onConfirm={confirmDeleteDb}
+            onCancel={() => setDbToDelete(null)}
+          />
+          <ToastBar toasts={toasts} />
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>

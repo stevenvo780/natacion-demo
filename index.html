@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gestión Integral Control de Asistencia</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- lucide-react UMD busca React en `global.react` (minuscula); el UMD de React publica `window.React` -->
+  <script>window.react = window.React;</script>
+  <script src="https://unpkg.com/lucide-react@0.292.0/dist/umd/lucide-react.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    @keyframes slideInBottom { from { transform: translateY(1rem); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    @keyframes zoomIn { from { transform: scale(0.95); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .animate-in.fade-in { animation: fadeIn 0.5s ease-out forwards; }
+    .animate-in.slide-in-from-bottom-4 { animation: slideInBottom 0.5s ease-out forwards; }
+    .animate-in.zoom-in-95 { animation: zoomIn 0.3s ease-out forwards; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef, useCallback } = React;
+    const {
+      ClipboardList, AlertCircle, Phone, Info, CheckCircle2,
+      X, MessageSquare, AlertTriangle, Clock,
+      QrCode, Database, Download, Calendar, CalendarDays, UserCheck, Printer, Trash2, RotateCcw
+    } = window.LucideReact;
+
+    const STORAGE_KEY = 'dolphin-admin-v2';
+    const PROFESORES = ['Elena', 'Carlos', 'Marina', 'Roberto'];
+
+    const SEED_STUDENTS = [
+      { id: '1', nombre: 'Juan', apellidos: 'García Pérez', padres: 'María Pérez y José García', curso: 'Natación Nivel 1', faltas: 5, llamado: false, ultimaConversacion: '', telefono: '600 000 001', tutor: 'María Pérez', categoria: 'Infantil (18+ meses)', mensualidad: '2 días/semana', pendientePago: true, horario: { profesor: 'Elena', dias: ['Lunes', 'Miércoles'], hora: '17:00' }, incidencias: [{ id: 'inc1', fecha: '2024-03-10', texto: 'No asiste por gripe.', resuelta: true }] },
+      { id: '2', nombre: 'Sofía', apellidos: 'Rodríguez L.', padres: 'Pedro Rodríguez', curso: 'Babies Inicial', faltas: 3, llamado: false, ultimaConversacion: '', telefono: '600 000 002', tutor: 'Pedro Rodríguez', categoria: 'Babies (40d - 18m)', mensualidad: 'Mini-grupo', pendientePago: false, horario: { profesor: 'Carlos', dias: ['Martes'], hora: '10:30' }, incidencias: [] },
+      { id: '3', nombre: 'Marcos', apellidos: 'Sánchez Ruiz', padres: 'Ana Ruiz', curso: 'Preparación Pruebas Acceso', faltas: 8, llamado: false, ultimaConversacion: '', telefono: '600 000 003', tutor: 'Ana Ruiz', categoria: 'Preparación Acceso', mensualidad: 'Técnica', pendientePago: false, horario: { profesor: 'Elena', dias: ['Jueves'], hora: '19:00' }, incidencias: [{ id: 'inc2', fecha: '2024-03-12', texto: 'Lesión de rodilla leve.', resuelta: false }] }
+    ];
+
+    // ── Persistencia ──────────────────────────────────────────────
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (e) {
+        console.warn('No se pudo leer el almacenamiento local:', e);
+        return null;
+      }
+    }
+
+    function saveState(data) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return true;
+      } catch (e) {
+        console.warn('No se pudo guardar en el almacenamiento local:', e);
+        return false;
+      }
+    }
+
+    // ── Exportación ───────────────────────────────────────────────
+    const EXPORT_HEADERS = ['Nombre Completo', 'Teléfono', 'Padres', 'Curso', 'Mensualidad', 'Pendiente Pago'];
+
+    function studentRows(students) {
+      return students.map(s => [
+        `${s.nombre} ${s.apellidos}`, s.telefono, s.padres, s.curso, s.mensualidad, s.pendientePago ? 'SÍ' : 'NO'
+      ]);
+    }
+
+    function csvCell(value) {
+      const str = String(value ?? '');
+      return /[",\n;]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+    }
+
+    function downloadBlob(content, filename, mime) {
+      const blob = new Blob([content], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function xmlEscape(value) {
+      return String(value ?? '').replace(/[<>&'"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]));
+    }
+
+    function exportCSV(students) {
+      const rows = [EXPORT_HEADERS, ...studentRows(students)];
+      // BOM para que Excel respete los acentos
+      downloadBlob('﻿' + rows.map(r => r.map(csvCell).join(',')).join('\r\n'), 'base_datos_alumnos.csv', 'text/csv;charset=utf-8');
+    }
+
+    function exportXML(students) {
+      const body = students.map(s => `  <alumno id="${xmlEscape(s.id)}">
+    <nombre>${xmlEscape(s.nombre)}</nombre>
+    <apellidos>${xmlEscape(s.apellidos)}</apellidos>
+    <telefono>${xmlEscape(s.telefono)}</telefono>
+    <padres>${xmlEscape(s.padres)}</padres>
+    <curso>${xmlEscape(s.curso)}</curso>
+    <categoria>${xmlEscape(s.categoria)}</categoria>
+    <mensualidad>${xmlEscape(s.mensualidad)}</mensualidad>
+    <pendientePago>${s.pendientePago ? 'SI' : 'NO'}</pendientePago>
+    <faltas>${Number(s.faltas) || 0}</faltas>
+  </alumno>`).join('\n');
+      downloadBlob(`<?xml version="1.0" encoding="UTF-8"?>\n<alumnos>\n${body}\n</alumnos>\n`, 'base_datos_alumnos.xml', 'application/xml;charset=utf-8');
+    }
+
+    function exportPDF(students) {
+      const rows = studentRows(students);
+      const win = window.open('', '_blank');
+      if (!win) {
+        alert('El navegador bloqueó la ventana de impresión. Permite las ventanas emergentes para generar el PDF.');
+        return;
+      }
+      const head = EXPORT_HEADERS.map(h => `<th>${xmlEscape(h)}</th>`).join('');
+      const body = rows.map(r => `<tr>${r.map(c => `<td>${xmlEscape(c)}</td>`).join('')}</tr>`).join('');
+      win.document.write(`<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"><title>Base de datos de alumnos</title>
+        <style>
+          body{font-family:system-ui,sans-serif;padding:24px;color:#0f172a}
+          h1{font-size:20px;margin:0 0 4px}
+          p.meta{color:#64748b;font-size:12px;margin:0 0 20px}
+          table{width:100%;border-collapse:collapse;font-size:12px}
+          th,td{border:1px solid #cbd5e1;padding:8px;text-align:left}
+          th{background:#f1f5f9;text-transform:uppercase;font-size:10px;letter-spacing:.05em}
+          tr:nth-child(even) td{background:#f8fafc}
+        </style></head><body>
+        <h1>Base de datos de alumnos</h1>
+        <p class="meta">${students.length} alumnos · generado el ${new Date().toLocaleString('es-ES')}</p>
+        <table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+        </body></html>`);
+      win.document.close();
+      win.focus();
+      win.print();
+    }
+
+    // ── Utilidades ────────────────────────────────────────────────
+    const MONTH_NAMES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
+
+    function toDateKey(date) {
+      return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    }
+
+    function fullName(student) {
+      return `${student.nombre} ${student.apellidos}`;
+    }
+
+    // ── Componentes de presentación ───────────────────────────────
+    function Toast({ toast }) {
+      if (!toast) return null;
+      const tone = toast.type === 'err' ? 'bg-rose-600' : toast.type === 'ok' ? 'bg-emerald-600' : 'bg-slate-800';
+      return (
+        <div className={`fixed bottom-6 right-6 z-[200] ${tone} text-white px-5 py-3 rounded-xl shadow-2xl font-semibold text-sm animate-in fade-in`}>
+          {toast.text}
+        </div>
+      );
+    }
+
+    function NavItem({ active, icon, label, onClick }) {
+      return (
+        <button
+          onClick={onClick}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${active ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-900/20' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
+        >
+          {icon} <span>{label}</span>
+        </button>
+      );
+    }
+
+    function InfoItem({ label, value }) {
+      return (
+        <div>
+          <p className="text-[10px] text-slate-400 font-bold uppercase">{label}</p>
+          <p className="text-sm font-semibold text-slate-800">{value}</p>
+        </div>
+      );
+    }
+
+    // ── Ranking de faltas ─────────────────────────────────────────
+    function RankingView({ students, onMarkCalled, onUndoCall, onOpenStudent }) {
+      const [notes, setNotes] = useState({});
+
+      const pendientes = useMemo(
+        () => students.filter(s => !s.llamado && s.faltas > 0).sort((a, b) => b.faltas - a.faltas),
+        [students]
+      );
+      const llamados = useMemo(() => students.filter(s => s.llamado), [students]);
+
+      return (
+        <div className="space-y-4 animate-in fade-in duration-500">
+          <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
+              <AlertTriangle className="text-amber-500" /> Ranking de Ausencias
+            </h2>
+            <span className="bg-amber-100 text-amber-700 px-3 py-1 rounded-full text-sm font-medium">
+              {pendientes.length} Pendientes de llamada
+            </span>
+          </div>
+
+          <div className="grid gap-3">
+            {pendientes.map(student => (
+              <div key={student.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 bg-rose-50 rounded-full flex items-center justify-center text-rose-600 font-bold text-lg border border-rose-100">
+                    {student.faltas}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <p className="font-bold text-slate-900">{fullName(student)}</p>
+                      <button onClick={() => onOpenStudent(student.id)} className="p-1 hover:bg-slate-100 rounded-full text-indigo-500"><Info size={18} /></button>
+                    </div>
+                    <p className="text-xs text-slate-500">{student.curso} • Prof. {student.horario.profesor}</p>
+                  </div>
+                </div>
+                <div className="flex flex-1 max-w-md items-center gap-2">
+                  <input
+                    type="text"
+                    value={notes[student.id] || ''}
+                    onChange={e => setNotes(prev => ({ ...prev, [student.id]: e.target.value }))}
+                    placeholder="Notas de llamada..."
+                    className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    onClick={() => { onMarkCalled(student.id, notes[student.id] || ''); setNotes(prev => ({ ...prev, [student.id]: '' })); }}
+                    className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-lg text-sm font-bold flex items-center gap-2 transition-colors whitespace-nowrap"
+                  >
+                    <Phone size={16} /> Marcar Llamado
+                  </button>
+                </div>
+              </div>
+            ))}
+            {pendientes.length === 0 && (
+              <div className="bg-white p-12 rounded-2xl text-center border-2 border-dashed border-slate-200">
+                <CheckCircle2 size={48} className="mx-auto text-emerald-400 mb-3" />
+                <p className="font-bold text-slate-800">No hay llamadas pendientes</p>
+              </div>
+            )}
+          </div>
+
+          {llamados.length > 0 && (
+            <div className="bg-white rounded-2xl border border-slate-200 p-5">
+              <h3 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-3">Ya contactados</h3>
+              <div className="space-y-2">
+                {llamados.map(s => (
+                  <div key={s.id} className="flex items-center justify-between gap-4 bg-slate-50 rounded-xl px-4 py-3 border border-slate-100">
+                    <div className="min-w-0">
+                      <p className="font-bold text-slate-800 text-sm">{fullName(s)}</p>
+                      <p className="text-xs text-slate-500 truncate">{s.ultimaConversacion || 'Sin notas registradas'}</p>
+                    </div>
+                    <button onClick={() => onUndoCall(s.id)} className="text-xs font-bold text-slate-500 hover:text-indigo-600 flex items-center gap-1 whitespace-nowrap">
+                      <RotateCcw size={14} /> Deshacer
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // ── Base de datos ─────────────────────────────────────────────
+    function DatabaseView({ students }) {
+      return (
+        <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
+            <div>
+              <h2 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Database className="text-indigo-600" /> Base de Datos General</h2>
+              <p className="text-slate-500 text-sm">Gestiona y exporta la información completa de los alumnos.</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => exportCSV(students)} className="flex items-center gap-2 bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-slate-700 transition-colors">
+                <Download size={16} /> CSV
+              </button>
+              <button onClick={() => exportXML(students)} className="flex items-center gap-2 bg-slate-100 text-slate-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-slate-200">
+                <Download size={16} /> XML
+              </button>
+              <button onClick={() => exportPDF(students)} className="flex items-center gap-2 bg-rose-50 text-rose-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-rose-100">
+                <Printer size={16} /> PDF
+              </button>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden overflow-x-auto">
+            <table className="w-full text-left border-collapse min-w-max">
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Nombre Completo</th>
+                  <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Teléfono / Padres</th>
+                  <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Curso / Mensualidad</th>
+                  <th className="p-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Estado Pago</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {students.map(s => (
+                  <tr key={s.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-4">
+                      <p className="font-bold text-slate-900">{fullName(s)}</p>
+                      <p className="text-xs text-indigo-600 font-medium">ID: {s.id}</p>
+                    </td>
+                    <td className="p-4 text-sm">
+                      <p className="font-medium text-slate-700">{s.telefono}</p>
+                      <p className="text-xs text-slate-400">{s.padres}</p>
+                    </td>
+                    <td className="p-4 text-sm">
+                      <p className="font-medium text-slate-700">{s.curso}</p>
+                      <p className="text-xs text-slate-400">{s.mensualidad}</p>
+                    </td>
+                    <td className="p-4">
+                      <span className={`px-2 py-1 rounded-md text-[10px] font-black uppercase ${s.pendientePago ? 'bg-rose-100 text-rose-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                        {s.pendientePago ? 'Deuda' : 'Pagado'}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Lector QR (cámara real) ───────────────────────────────────
+    function QRView({ students, registros, onRegister }) {
+      const videoRef = useRef(null);
+      const [status, setStatus] = useState('idle'); // idle | starting | scanning | error
+      const [errorMsg, setErrorMsg] = useState('');
+      const [manualId, setManualId] = useState('');
+      const streamRef = useRef(null);
+      const loopRef = useRef(null);
+
+      const supportsDetector = typeof window.BarcodeDetector !== 'undefined';
+
+      const stop = useCallback(() => {
+        if (loopRef.current) { clearInterval(loopRef.current); loopRef.current = null; }
+        if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+        setStatus('idle');
+      }, []);
+
+      useEffect(() => stop, [stop]);
+
+      const start = async () => {
+        setErrorMsg('');
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          setStatus('error');
+          setErrorMsg('Este navegador no expone la cámara. Usa el registro manual.');
+          return;
+        }
+        if (!supportsDetector) {
+          setStatus('error');
+          setErrorMsg('Tu navegador no soporta la API de detección de códigos (BarcodeDetector). Usa Chrome/Edge, o registra manualmente.');
+          return;
+        }
+        setStatus('starting');
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+          streamRef.current = stream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            await videoRef.current.play();
+          }
+          const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+          setStatus('scanning');
+          loopRef.current = setInterval(async () => {
+            if (!videoRef.current) return;
+            try {
+              const codes = await detector.detect(videoRef.current);
+              if (codes && codes.length > 0) {
+                const value = String(codes[0].rawValue || '').trim();
+                if (value) onRegister(value);
+              }
+            } catch (e) { /* frame sin código legible */ }
+          }, 700);
+        } catch (e) {
+          setStatus('error');
+          setErrorMsg('No se pudo abrir la cámara: ' + (e && e.message ? e.message : 'permiso denegado'));
+        }
+      };
+
+      const hoy = toDateKey(new Date());
+      const registrosHoy = registros.filter(r => r.fecha === hoy).slice().reverse();
+
+      return (
+        <div className="max-w-xl mx-auto space-y-6 py-6 animate-in zoom-in-95 duration-300">
+          <div className="bg-white p-8 rounded-3xl shadow-xl border border-slate-200 space-y-6">
+            <div className="w-full aspect-video mx-auto bg-slate-900 rounded-2xl overflow-hidden relative flex items-center justify-center">
+              <video ref={videoRef} playsInline muted className={`w-full h-full object-cover ${status === 'scanning' ? '' : 'hidden'}`} />
+              {status !== 'scanning' && <QrCode size={80} className="text-slate-600" />}
+            </div>
+
+            <div className="text-center">
+              <h2 className="text-2xl font-bold text-slate-800">Escáner de Acceso</h2>
+              <p className="text-slate-500 mt-2 text-sm">El QR del alumno debe contener su ID o su nombre completo.</p>
+            </div>
+
+            <div className="flex justify-center gap-3">
+              {status !== 'scanning' ? (
+                <button onClick={start} className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-full text-sm font-bold flex items-center gap-2">
+                  <UserCheck size={16} /> Activar cámara
+                </button>
+              ) : (
+                <button onClick={stop} className="bg-rose-600 hover:bg-rose-500 text-white px-5 py-2 rounded-full text-sm font-bold flex items-center gap-2">
+                  <X size={16} /> Detener
+                </button>
+              )}
+            </div>
+
+            {status === 'error' && (
+              <p className="text-sm text-rose-600 bg-rose-50 border border-rose-100 rounded-xl p-3 text-center">{errorMsg}</p>
+            )}
+
+            <div className="border-t border-slate-100 pt-5">
+              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Registro manual</p>
+              <div className="flex gap-2">
+                <select value={manualId} onChange={e => setManualId(e.target.value)} className="flex-1 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                  <option value="">Selecciona un alumno…</option>
+                  {students.map(s => <option key={s.id} value={s.id}>{fullName(s)}</option>)}
+                </select>
+                <button
+                  disabled={!manualId}
+                  onClick={() => { onRegister(manualId); setManualId(''); }}
+                  className="bg-slate-800 disabled:opacity-40 text-white px-4 py-2 rounded-lg text-sm font-bold"
+                >
+                  Registrar
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 p-5">
+            <h3 className="text-sm font-black text-slate-500 uppercase tracking-widest mb-3">Accesos de hoy ({registrosHoy.length})</h3>
+            {registrosHoy.length === 0 ? (
+              <p className="text-sm text-slate-400">Todavía no se registró ningún acceso hoy.</p>
+            ) : (
+              <div className="space-y-2">
+                {registrosHoy.map(r => (
+                  <div key={r.id} className="flex items-center justify-between bg-slate-50 rounded-xl px-4 py-2 border border-slate-100">
+                    <span className="font-bold text-slate-800 text-sm">{r.alumno}</span>
+                    <span className="text-xs font-mono text-slate-500">{r.hora}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ── Asistencias / ausencias por día ───────────────────────────
+    function AsistenciasView({ students, ausencias, registros, onAddAusencia, onDeleteAusencia }) {
+      const today = new Date();
+      const [currentMonth, setCurrentMonth] = useState(today.getMonth());
+      const [currentYear, setCurrentYear] = useState(today.getFullYear());
+      const [selectedDate, setSelectedDate] = useState(toDateKey(today));
+      const [form, setForm] = useState({ hora: '', profesor: PROFESORES[0], alumnoId: '', motivo: '', asistente: '' });
+
+      const ausenciasPorDia = useMemo(() => {
+        const map = {};
+        ausencias.forEach(a => { (map[a.fecha] = map[a.fecha] || []).push(a); });
+        return map;
+      }, [ausencias]);
+
+      const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
+      const firstDayRaw = new Date(currentYear, currentMonth, 1).getDay();
+      const firstDay = firstDayRaw === 0 ? 6 : firstDayRaw - 1;
+
+      const prevMonth = () => currentMonth === 0 ? (setCurrentMonth(11), setCurrentYear(currentYear - 1)) : setCurrentMonth(currentMonth - 1);
+      const nextMonth = () => currentMonth === 11 ? (setCurrentMonth(0), setCurrentYear(currentYear + 1)) : setCurrentMonth(currentMonth + 1);
+
+      const cells = [];
+      for (let i = 0; i < firstDay; i++) cells.push(<div key={`empty-${i}`} className="p-3"></div>);
+      for (let i = 1; i <= daysInMonth; i++) {
+        const dateStr = `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(i).padStart(2, '0')}`;
+        const hasFaltas = !!ausenciasPorDia[dateStr];
+        const isSelected = selectedDate === dateStr;
+        cells.push(
+          <button
+            key={i}
+            onClick={() => setSelectedDate(dateStr)}
+            className={`p-3 h-16 rounded-2xl flex flex-col items-center justify-center gap-1 border transition-all relative ${
+              isSelected ? 'bg-indigo-600 text-white border-indigo-600 shadow-md shadow-indigo-200'
+              : hasFaltas ? 'bg-rose-50 border-rose-100 text-slate-800 hover:bg-rose-100'
+              : 'bg-white border-slate-100 text-slate-800 hover:bg-slate-50'}`}
+          >
+            <span className="font-bold text-lg leading-none">{i}</span>
+            {hasFaltas && <span className={`w-2 h-2 rounded-full absolute bottom-3 ${isSelected ? 'bg-white' : 'bg-rose-500'}`}></span>}
+          </button>
+        );
+      }
+
+      const selectedFaltas = ausenciasPorDia[selectedDate] || [];
+      const selectedAccesos = registros.filter(r => r.fecha === selectedDate);
+
+      const submit = (e) => {
+        e.preventDefault();
+        if (!form.alumnoId || !form.hora) return;
+        const alumno = students.find(s => s.id === form.alumnoId);
+        onAddAusencia({
+          id: `aus-${Date.now()}`,
+          fecha: selectedDate,
+          hora: form.hora,
+          profesor: form.profesor,
+          alumnoId: form.alumnoId,
+          alumno: alumno ? fullName(alumno) : form.alumnoId,
+          motivo: form.motivo || 'Sin motivo indicado',
+          asistente: form.asistente || 'Sin asistente'
+        });
+        setForm({ hora: '', profesor: PROFESORES[0], alumnoId: '', motivo: '', asistente: '' });
+      };
+
+      return (
+        <div className="space-y-6 animate-in slide-in-from-bottom-4 duration-500">
+          <div className="flex flex-col lg:flex-row gap-6">
+            <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 lg:w-1/3 h-fit">
+              <div className="flex items-center justify-between mb-6">
+                <button onClick={prevMonth} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">&lt;</button>
+                <h3 className="text-lg font-black text-slate-800 tracking-tight">{MONTH_NAMES[currentMonth]} {currentYear}</h3>
+                <button onClick={nextMonth} className="p-2 hover:bg-slate-100 rounded-full text-slate-500">&gt;</button>
+              </div>
+              <div className="grid grid-cols-7 gap-2 mb-2 text-center">
+                {['L','M','X','J','V','S','D'].map(d => <div key={d} className="text-[10px] font-black text-slate-400 uppercase">{d}</div>)}
+              </div>
+              <div className="grid grid-cols-7 gap-2">{cells}</div>
+            </div>
+
+            <div className="flex-1 space-y-6">
+              <div className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                <div className="mb-6 flex items-center justify-between flex-wrap gap-3">
+                  <div>
+                    <h2 className="text-2xl font-black text-slate-800 flex items-center gap-2">
+                      <CalendarDays className="text-indigo-600" /> Registro de Asistencias
+                    </h2>
+                    <p className="text-slate-500 text-sm mt-1">
+                      Día seleccionado: <span className="font-bold text-slate-700">{selectedDate}</span> · {selectedAccesos.length} accesos por QR
+                    </p>
+                  </div>
+                  <div className="bg-rose-50 text-rose-700 px-4 py-2 rounded-xl text-sm font-bold flex items-center gap-2">
+                    <AlertTriangle size={16}/> {selectedFaltas.length} Faltas
+                  </div>
+                </div>
+
+                {selectedFaltas.length > 0 ? (
+                  <div className="overflow-hidden rounded-2xl border border-slate-200 overflow-x-auto">
+                    <table className="w-full text-left border-collapse min-w-max">
+                      <thead className="bg-slate-50 border-b border-slate-200">
+                        <tr>
+                          <th className="p-4 text-xs font-black text-slate-500 uppercase tracking-wider">Hora / Prof.</th>
+                          <th className="p-4 text-xs font-black text-slate-500 uppercase tracking-wider">Alumno que falta + motivo</th>
+                          <th className="p-4 text-xs font-black text-slate-500 uppercase tracking-wider">Asiste en su lugar</th>
+                          <th className="p-4"></th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {selectedFaltas.map(falta => (
+                          <tr key={falta.id} className="hover:bg-slate-50 transition-colors">
+                            <td className="p-4">
+                              <p className="font-black text-slate-900">{falta.hora}</p>
+                              <p className="text-xs font-bold text-indigo-600">Prof. {falta.profesor}</p>
+                            </td>
+                            <td className="p-4">
+                              <p className="font-bold text-slate-800">{falta.alumno}</p>
+                              <p className="text-xs text-rose-500 font-medium bg-rose-50 px-2 py-1 rounded-md inline-block mt-1">Motivo: {falta.motivo}</p>
+                            </td>
+                            <td className="p-4">
+                              <div className={`text-sm font-bold px-3 py-2 rounded-xl inline-block ${String(falta.asistente).includes('Sin asistente') ? 'bg-slate-100 text-slate-500' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'}`}>
+                                {falta.asistente}
+                              </div>
+                            </td>
+                            <td className="p-4 text-right">
+                              <button onClick={() => onDeleteAusencia(falta.id)} className="text-slate-300 hover:text-rose-500"><Trash2 size={16} /></button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-12 text-center border-2 border-dashed border-slate-100 rounded-2xl">
+                    <CheckCircle2 size={48} className="text-emerald-400 mb-4" />
+                    <h3 className="text-lg font-bold text-slate-800">Día sin faltas registradas</h3>
+                  </div>
+                )}
+              </div>
+
+              <form onSubmit={submit} className="bg-white p-6 rounded-3xl shadow-sm border border-slate-100 space-y-4">
+                <h3 className="text-sm font-black text-slate-500 uppercase tracking-widest">Anotar una falta el {selectedDate}</h3>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <input required type="time" value={form.hora} onChange={e => setForm({ ...form, hora: e.target.value })} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                  <select value={form.profesor} onChange={e => setForm({ ...form, profesor: e.target.value })} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    {PROFESORES.map(p => <option key={p} value={p}>Prof. {p}</option>)}
+                  </select>
+                  <select required value={form.alumnoId} onChange={e => setForm({ ...form, alumnoId: e.target.value })} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500">
+                    <option value="">Alumno que falta…</option>
+                    {students.map(s => <option key={s.id} value={s.id}>{fullName(s)}</option>)}
+                  </select>
+                  <input type="text" placeholder="Motivo" value={form.motivo} onChange={e => setForm({ ...form, motivo: e.target.value })} className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                  <input type="text" placeholder="Quién asiste en su lugar (opcional)" value={form.asistente} onChange={e => setForm({ ...form, asistente: e.target.value })} className="md:col-span-2 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-indigo-500" />
+                </div>
+                <button type="submit" className="bg-indigo-600 hover:bg-indigo-500 text-white px-5 py-2 rounded-lg text-sm font-bold">Registrar falta</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Horarios ──────────────────────────────────────────────────
+    function ScheduleView({ students }) {
+      return (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {PROFESORES.map(p => {
+            const asignados = students.filter(s => s.horario.profesor === p);
+            return (
+              <div key={p} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 bg-indigo-600 text-white rounded-full flex items-center justify-center font-bold">{p[0]}</div>
+                  <h3 className="font-bold">Prof. {p}</h3>
+                </div>
+                <div className="space-y-2">
+                  {asignados.map(s => (
+                    <div key={s.id} className="text-xs p-2 bg-slate-50 rounded border border-slate-100 flex justify-between">
+                      <span>{s.nombre}</span>
+                      <span className="font-bold">{s.horario.hora}</span>
+                    </div>
+                  ))}
+                  {asignados.length === 0 && <p className="text-xs text-slate-400">Sin alumnos asignados</p>}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // ── Incidencias ───────────────────────────────────────────────
+    function IncidenciasView({ students, onToggleIncidencia }) {
+      const todas = useMemo(() => {
+        const out = [];
+        students.forEach(s => (s.incidencias || []).forEach(inc => out.push({ ...inc, alumnoId: s.id, alumno: fullName(s) })));
+        return out.sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+      }, [students]);
+
+      const abiertas = todas.filter(i => !i.resuelta);
+
+      if (todas.length === 0) {
+        return (
+          <div className="bg-white p-12 rounded-3xl text-center border-2 border-dashed border-slate-200">
+            <MessageSquare size={64} className="mx-auto text-slate-200 mb-4" />
+            <h2 className="text-xl font-bold">Sin incidencias registradas</h2>
+          </div>
+        );
+      }
+
+      return (
+        <div className="space-y-4 animate-in fade-in duration-500">
+          <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+            <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2"><AlertCircle className="text-indigo-600" /> Incidencias</h2>
+            <span className="bg-rose-100 text-rose-700 px-3 py-1 rounded-full text-sm font-medium">{abiertas.length} sin resolver</span>
+          </div>
+          <div className="space-y-2">
+            {todas.map(inc => (
+              <div key={inc.id} className={`bg-white p-4 rounded-xl border flex items-center justify-between gap-4 ${inc.resuelta ? 'border-slate-100 opacity-60' : 'border-rose-100'}`}>
+                <div className="min-w-0">
+                  <p className="font-bold text-slate-800 text-sm">{inc.alumno}</p>
+                  <p className="text-xs text-slate-500"><span className="font-bold text-indigo-600">{inc.fecha}:</span> {inc.texto}</p>
+                </div>
+                <button
+                  onClick={() => onToggleIncidencia(inc.alumnoId, inc.id)}
+                  className={`text-xs font-bold px-3 py-2 rounded-lg whitespace-nowrap ${inc.resuelta ? 'bg-slate-100 text-slate-500' : 'bg-emerald-500 text-white hover:bg-emerald-600'}`}
+                >
+                  {inc.resuelta ? 'Reabrir' : 'Marcar resuelta'}
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // ── App ───────────────────────────────────────────────────────
+    function App() {
+      const persisted = useMemo(loadState, []);
+      const [activeTab, setActiveTab] = useState('ranking');
+      const [showModal, setShowModal] = useState(null);
+      const [students, setStudents] = useState(() => (persisted && persisted.students) || SEED_STUDENTS);
+      const [ausencias, setAusencias] = useState(() => (persisted && persisted.ausencias) || []);
+      const [registros, setRegistros] = useState(() => (persisted && persisted.registros) || []);
+      const [toast, setToast] = useState(null);
+
+      useEffect(() => { saveState({ students, ausencias, registros }); }, [students, ausencias, registros]);
+
+      const notify = useCallback((text, type = 'info') => {
+        setToast({ text, type });
+        setTimeout(() => setToast(null), 3000);
+      }, []);
+
+      const markCalled = (id, nota) => {
+        setStudents(prev => prev.map(s => s.id === id ? { ...s, llamado: true, ultimaConversacion: nota } : s));
+        notify('Llamada registrada', 'ok');
+      };
+
+      const undoCall = (id) => {
+        setStudents(prev => prev.map(s => s.id === id ? { ...s, llamado: false } : s));
+      };
+
+      const toggleIncidencia = (studentId, incId) => {
+        setStudents(prev => prev.map(s => s.id !== studentId ? s : {
+          ...s,
+          incidencias: s.incidencias.map(i => i.id === incId ? { ...i, resuelta: !i.resuelta } : i)
+        }));
+      };
+
+      const registrarAcceso = (rawValue) => {
+        const value = String(rawValue).trim();
+        const alumno = students.find(s => s.id === value || fullName(s).toLowerCase() === value.toLowerCase());
+        if (!alumno) {
+          notify(`QR no reconocido: "${value}"`, 'err');
+          return;
+        }
+        const now = new Date();
+        const fecha = toDateKey(now);
+        const hora = now.toTimeString().slice(0, 5);
+        const yaRegistrado = registros.some(r => r.alumnoId === alumno.id && r.fecha === fecha);
+        if (yaRegistrado) return;
+        setRegistros(prev => [...prev, { id: `reg-${Date.now()}`, alumnoId: alumno.id, alumno: fullName(alumno), fecha, hora }]);
+        notify(`Acceso registrado: ${fullName(alumno)}`, 'ok');
+      };
+
+      const selected = students.find(s => s.id === showModal);
+
+      return (
+        <div className="min-h-screen bg-slate-50 font-sans text-slate-900 flex flex-col md:flex-row">
+          <nav className="w-full md:w-64 bg-slate-900 text-white flex flex-col z-50 md:h-screen md:sticky md:top-0">
+            <div className="p-6">
+              <h1 className="text-2xl font-black tracking-tighter text-indigo-400">CONTROL<span className="text-white"> ASISTENCIA</span></h1>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Gestión Integrada</p>
+            </div>
+            <div className="flex-1 px-4 space-y-1 overflow-y-auto">
+              <NavItem active={activeTab === 'ranking'} icon={<ClipboardList size={20}/>} label="Ranking Faltas" onClick={() => setActiveTab('ranking')} />
+              <NavItem active={activeTab === 'horarios'} icon={<Calendar size={20}/>} label="Horarios" onClick={() => setActiveTab('horarios')} />
+              <NavItem active={activeTab === 'asistencias'} icon={<CalendarDays size={20}/>} label="Asistencias" onClick={() => setActiveTab('asistencias')} />
+              <NavItem active={activeTab === 'qr'} icon={<QrCode size={20}/>} label="Lector QR" onClick={() => setActiveTab('qr')} />
+              <NavItem active={activeTab === 'database'} icon={<Database size={20}/>} label="Base de Datos" onClick={() => setActiveTab('database')} />
+              <NavItem active={activeTab === 'incidencias'} icon={<AlertCircle size={20}/>} label="Incidencias" onClick={() => setActiveTab('incidencias')} />
+            </div>
+            <div className="p-4 mt-auto">
+              <div className="bg-slate-800 rounded-xl p-3 flex items-center gap-3">
+                <div className="w-8 h-8 bg-indigo-500 rounded-full flex items-center justify-center text-xs font-bold uppercase">AD</div>
+                <div>
+                  <p className="text-xs font-bold">Admin Principal</p>
+                  <p className="text-[10px] text-slate-400">Datos guardados en este equipo</p>
+                </div>
+              </div>
+            </div>
+          </nav>
+
+          <main className="flex-1 p-4 md:p-8 overflow-y-auto">
+            <div className="max-w-6xl mx-auto">
+              {activeTab === 'ranking' && <RankingView students={students} onMarkCalled={markCalled} onUndoCall={undoCall} onOpenStudent={setShowModal} />}
+              {activeTab === 'asistencias' && <AsistenciasView students={students} ausencias={ausencias} registros={registros} onAddAusencia={a => setAusencias(prev => [...prev, a])} onDeleteAusencia={id => setAusencias(prev => prev.filter(x => x.id !== id))} />}
+              {activeTab === 'database' && <DatabaseView students={students} />}
+              {activeTab === 'qr' && <QRView students={students} registros={registros} onRegister={registrarAcceso} />}
+              {activeTab === 'horarios' && <ScheduleView students={students} />}
+              {activeTab === 'incidencias' && <IncidenciasView students={students} onToggleIncidencia={toggleIncidencia} />}
+            </div>
+          </main>
+
+          {selected && (
+            <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4" onClick={() => setShowModal(null)}>
+              <div className="bg-white rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200" onClick={e => e.stopPropagation()}>
+                <div className="p-6 bg-indigo-600 text-white flex justify-between items-center">
+                  <div>
+                    <h3 className="text-2xl font-bold">{fullName(selected)}</h3>
+                    <p className="text-indigo-100 text-xs font-bold uppercase tracking-wider">Ficha técnica del alumno</p>
+                  </div>
+                  <button onClick={() => setShowModal(null)} className="p-2 hover:bg-white/20 rounded-full"><X size={24} /></button>
+                </div>
+                <div className="p-8 grid grid-cols-1 md:grid-cols-2 gap-8 max-h-[70vh] overflow-y-auto">
+                  <section className="space-y-4">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b pb-2">Información de contacto</h4>
+                    <InfoItem label="Teléfono" value={selected.telefono} />
+                    <InfoItem label="Tutor/Padres" value={selected.padres} />
+                    <InfoItem label="Categoría" value={selected.categoria} />
+                  </section>
+                  <section className="space-y-4">
+                    <h4 className="text-xs font-black text-slate-400 uppercase tracking-widest border-b pb-2">Plan y finanzas</h4>
+                    <InfoItem label="Curso actual" value={selected.curso} />
+                    <InfoItem label="Mensualidad" value={selected.mensualidad} />
+                    <div className={`p-3 rounded-xl border font-bold text-center ${selected.pendientePago ? 'bg-rose-50 border-rose-100 text-rose-700' : 'bg-emerald-50 border-emerald-100 text-emerald-700'}`}>
+                      {selected.pendientePago ? '⚠️ PAGO PENDIENTE' : '✓ AL DÍA'}
+                    </div>
+                  </section>
+                  <section className="col-span-full bg-slate-50 p-4 rounded-2xl space-y-3">
+                    <h4 className="text-sm font-bold flex items-center gap-2"><Clock size={16}/> Historial de incidencias</h4>
+                    {(selected.incidencias || []).length === 0 && <p className="text-xs text-slate-400">Sin incidencias.</p>}
+                    {(selected.incidencias || []).map(inc => (
+                      <div key={inc.id} className="text-xs p-2 bg-white rounded border border-slate-200">
+                        <span className="font-bold text-indigo-600">{inc.fecha}: </span>{inc.texto}
+                      </div>
+                    ))}
+                  </section>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <Toast toast={toast} />
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
