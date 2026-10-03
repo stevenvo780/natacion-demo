@@ -338,10 +338,16 @@
       const [manualId, setManualId] = useState('');
       const streamRef = useRef(null);
       const loopRef = useRef(null);
+      const scanSessionRef = useRef(0);
+      const onRegisterRef = useRef(onRegister);
+
+      useEffect(() => { onRegisterRef.current = onRegister; }, [onRegister]);
 
       const supportsDetector = typeof window.BarcodeDetector !== 'undefined';
 
       const stop = useCallback(() => {
+        // Invalida también detecciones y arranques que siguen pendientes.
+        scanSessionRef.current += 1;
         if (loopRef.current) { clearInterval(loopRef.current); loopRef.current = null; }
         if (streamRef.current) { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
         setStatus('idle');
@@ -350,6 +356,8 @@
       useEffect(() => stop, [stop]);
 
       const start = async () => {
+        stop();
+        const session = scanSessionRef.current;
         setErrorMsg('');
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           setStatus('error');
@@ -364,24 +372,32 @@
         setStatus('starting');
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+          if (session !== scanSessionRef.current) {
+            stream.getTracks().forEach(t => t.stop());
+            return;
+          }
           streamRef.current = stream;
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
             await videoRef.current.play();
           }
+          if (session !== scanSessionRef.current) return;
           const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
           setStatus('scanning');
           loopRef.current = setInterval(async () => {
-            if (!videoRef.current) return;
+            if (session !== scanSessionRef.current || !videoRef.current) return;
             try {
               const codes = await detector.detect(videoRef.current);
+              if (session !== scanSessionRef.current) return;
               if (codes && codes.length > 0) {
                 const value = String(codes[0].rawValue || '').trim();
-                if (value) onRegister(value);
+                if (value) onRegisterRef.current(value);
               }
             } catch (e) { /* frame sin código legible */ }
           }, 700);
         } catch (e) {
+          if (session !== scanSessionRef.current) return;
+          stop();
           setStatus('error');
           setErrorMsg('No se pudo abrir la cámara: ' + (e && e.message ? e.message : 'permiso denegado'));
         }
@@ -696,6 +712,8 @@
       const [ausencias, setAusencias] = useState(() => (persisted && persisted.ausencias) || []);
       const [registros, setRegistros] = useState(() => (persisted && persisted.registros) || []);
       const [toast, setToast] = useState(null);
+      // Incluye accesos pendientes de renderizar, también desde callbacks del lector.
+      const registrosRef = useRef(registros);
 
       useEffect(() => { saveState({ students, ausencias, registros }); }, [students, ausencias, registros]);
 
@@ -730,9 +748,11 @@
         const now = new Date();
         const fecha = toDateKey(now);
         const hora = now.toTimeString().slice(0, 5);
-        const yaRegistrado = registros.some(r => r.alumnoId === alumno.id && r.fecha === fecha);
+        const yaRegistrado = registrosRef.current.some(r => r.alumnoId === alumno.id && r.fecha === fecha);
         if (yaRegistrado) return;
-        setRegistros(prev => [...prev, { id: `reg-${Date.now()}`, alumnoId: alumno.id, alumno: fullName(alumno), fecha, hora }]);
+        const siguiente = [...registrosRef.current, { id: `reg-${alumno.id}-${fecha}`, alumnoId: alumno.id, alumno: fullName(alumno), fecha, hora }];
+        registrosRef.current = siguiente;
+        setRegistros(siguiente);
         notify(`Acceso registrado: ${fullName(alumno)}`, 'ok');
       };
 
